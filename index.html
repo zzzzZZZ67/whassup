@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>What's Up? · v0.4.5</title>
+<title>What's Up? · v0.5.0</title>
 <style>
   :root{
     --gold:#e9b96e;
@@ -119,6 +119,34 @@
   .badge{font-size:10px;padding:1px 6px;border-radius:999px;margin-left:6px;white-space:nowrap}
   .badge.ok{color:#8ee6b0;border:1px solid rgba(110,230,160,.5)}
   .badge.new{color:#f2c94c;border:1px solid rgba(242,201,76,.5)}
+  #mobile-pads{position:fixed;inset:0;pointer-events:none;z-index:12;display:none}
+  #mobile-pads.on{display:block}
+  #mobile-pads .pad{
+    position:absolute;bottom:34px;width:150px;height:150px;border-radius:50%;
+    background:radial-gradient(circle at 50% 45%,rgba(255,255,255,.07),rgba(0,0,0,.30));
+    border:1px solid rgba(233,185,110,.28);pointer-events:auto;touch-action:none;
+    box-shadow:inset 0 0 24px rgba(0,0,0,.35);
+  }
+  #pad-1{left:24px}
+  #pad-2{right:24px}
+  #mobile-pads .knob{
+    position:absolute;left:50%;top:50%;width:58px;height:58px;margin:-29px 0 0 -29px;border-radius:50%;
+    background:rgba(233,185,110,.32);border:1px solid rgba(233,185,110,.5);
+    transition:background .1s,box-shadow .1s;
+  }
+  #mobile-pads .pad.grip .knob{
+    background:linear-gradient(180deg,#f2c780,#d19a45);
+    box-shadow:0 0 16px rgba(242,199,128,.65);
+  }
+  #mobile-pads .pad-tag{
+    position:absolute;left:-10px;right:-10px;bottom:-22px;text-align:center;
+    font-size:11px;color:var(--muted);white-space:nowrap;
+  }
+  @media (max-width:820px){
+    #mobile-pads .pad{width:126px;height:126px;bottom:26px}
+    #mobile-pads .knob{width:50px;height:50px;margin:-25px 0 0 -25px}
+  }
+
   .chip{
     font-size:13px;padding:8px 14px;border-radius:999px;
     border:1px solid rgba(233,185,110,.3);background:rgba(255,255,255,.05);color:var(--ink);
@@ -130,6 +158,10 @@
 <div id="stage">
   <canvas id="game"></canvas>
   <canvas id="cam" class="hidden" width="260" height="195"></canvas>
+  <div id="mobile-pads">
+    <div class="pad" id="pad-1"><div class="knob"></div><div class="pad-tag">手 1 · 双击抓/放</div></div>
+    <div class="pad" id="pad-2"><div class="knob"></div><div class="pad-tag">手 2 · 双击抓/放</div></div>
+  </div>
   <div id="toast"></div>
   <div id="ui">
     <div class="screen" id="s-boot">
@@ -138,7 +170,8 @@
       <p class="sub">用你的身体攀岩。<br>头部是核心，两只手是攀岩者的手——握拳抓住岩点，张开松手。</p>
       <div class="btns">
         <button class="primary" id="btn-cam">摄像头模式</button>
-        <button id="btn-demo">演示模式（无摄像头）</button>
+        <button id="btn-demo">演示模式（键盘）</button>
+        <button id="btn-mobile">移动端（触屏）</button>
       </div>
       <p class="hint" style="margin:14px 0 4px">正式关卡（按层生成，3–10 层）：</p>
       <div class="btns" id="gen-select">
@@ -236,7 +269,7 @@
   /* ============================================================
    * 0. 元信息与常量
    * ============================================================ */
-  const VERSION = "v0.4.5";
+  const VERSION = "v0.5.0";
   const VIEW_W = 1600, VIEW_H = 900;
   const WORLD_W = 3200, WORLD_H = 4400;
   function worldH() { return Game.worldH || WORLD_H; }
@@ -796,6 +829,75 @@
   /* ============================================================
    * 4. 输入采样
    * ============================================================ */
+  const Mobile = {
+    pads: [
+      { vec: { x: 0, y: 0 }, angle: -Math.PI / 2, grip: false, lastTap: 0, el: null, knob: null },
+      { vec: { x: 0, y: 0 }, angle: -Math.PI / 2, grip: false, lastTap: 0, el: null, knob: null }
+    ],
+    bind() {
+      if (typeof document === "undefined") return;
+      for (let i = 0; i < 2; i++) {
+        const el = document.getElementById("pad-" + (i + 1));
+        if (!el || !el.addEventListener) continue;
+        const pad = this.pads[i];
+        pad.el = el;
+        pad.knob = el.querySelector ? el.querySelector(".knob") : null;
+        const center = () => {
+          const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { left: 0, top: 0, width: 150, height: 150 };
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2, r: (r.width || 150) / 2 };
+        };
+        let dragging = false, sx = 0, sy = 0, moved = 0;
+        const apply = (ev) => {
+          const c = center();
+          let vx = (ev.clientX - c.x) / (c.r * 0.85);
+          let vy = (ev.clientY - c.y) / (c.r * 0.85);
+          const m2 = Math.hypot(vx, vy);
+          if (m2 > 1) { vx /= m2; vy /= m2; }
+          pad.vec = { x: vx, y: vy };
+          if (m2 > 0.15) pad.angle = Math.atan2(vy, vx);
+          if (pad.knob && pad.knob.style) {
+            pad.knob.style.transform = "translate(" + (vx * c.r * 0.55).toFixed(1) + "px," + (vy * c.r * 0.55).toFixed(1) + "px)";
+          }
+        };
+        el.addEventListener("pointerdown", (ev) => {
+          ev.preventDefault();
+          dragging = true;
+          moved = 0;
+          sx = ev.clientX;
+          sy = ev.clientY;
+          if (el.setPointerCapture) el.setPointerCapture(ev.pointerId);
+          apply(ev);
+        });
+        el.addEventListener("pointermove", (ev) => {
+          if (!dragging) return;
+          ev.preventDefault();
+          moved = Math.max(moved, Math.hypot(ev.clientX - sx, ev.clientY - sy));
+          apply(ev);
+        });
+        const finish = () => {
+          if (!dragging) return;
+          dragging = false;
+          pad.vec = { x: 0, y: 0 };
+          if (pad.knob && pad.knob.style) pad.knob.style.transform = "";
+          if (moved < 18) {
+            const now = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+            if (now - pad.lastTap < 350) {
+              pad.grip = !pad.grip;
+              if (el.classList) el.classList.toggle("grip", pad.grip);
+              pad.lastTap = 0;
+              Sfx.ensure();
+            } else {
+              pad.lastTap = now;
+            }
+          }
+        };
+        el.addEventListener("pointerup", finish);
+        el.addEventListener("pointercancel", finish);
+        el.addEventListener("pointerleave", finish);
+      }
+    }
+  };
+
   const Input = {
     // 返回：{ hands:[{dx,dy,len,closed}] }，dx/dy 是"手相对黄点"的偏移（世界像素）
     sample(dt) {
@@ -824,6 +926,20 @@
           return { dx: ddx, dy: ddy, len, closed: !!h.closed, lost: false };
         });
         return { hands };
+      }
+
+      if (g.mode === "mobile") {
+        const toHand = (pad) => {
+          const m2 = Math.hypot(pad.vec.x, pad.vec.y);
+          const len = clamp(m2 * REACH, MIN_REACH, REACH);
+          return {
+            dx: Math.cos(pad.angle) * len,
+            dy: Math.sin(pad.angle) * len,
+            len,
+            closed: !!pad.grip
+          };
+        };
+        return { hands: [toHand(Mobile.pads[0]), toHand(Mobile.pads[1])] };
       }
 
       // 演示模式：WASD 移动手1，IJKL 移动手2，X/M 切换左右手抓握
@@ -1366,6 +1482,7 @@
     const cp = g.level.checkpoints[0];
     if (cp) { cp.activated = true; g.cpIndex = 0; }
     g.camera.ready = false;
+    updateMobilePads();
   }
 
   function startLevel(index) {
@@ -2241,19 +2358,32 @@
 
   function updateModeButtons() {
     if (typeof document === "undefined") return;
-    const cam = document.getElementById("btn-cam");
-    const demo = document.getElementById("btn-demo");
-    if (!cam || !demo) return;
-    const onCam = Game.mode === "camera";
-    const onDemo = Game.mode === "demo";
-    if (cam.classList) {
-      cam.classList.toggle("mode-on", onCam);
-      cam.classList.toggle("mode-off", onDemo);
+    const modes = [["btn-cam", "camera"], ["btn-demo", "demo"], ["btn-mobile", "mobile"]];
+    for (const [id, mode] of modes) {
+      const el = document.getElementById(id);
+      if (!el || !el.classList) continue;
+      el.classList.toggle("mode-on", Game.mode === mode);
+      el.classList.toggle("mode-off", !!Game.mode && Game.mode !== mode);
     }
-    if (demo.classList) {
-      demo.classList.toggle("mode-on", onDemo);
-      demo.classList.toggle("mode-off", onCam);
+  }
+
+  function updateMobilePads() {
+    if (typeof document === "undefined") return;
+    const el = document.getElementById("mobile-pads");
+    if (!el || !el.classList) return;
+    const on = Game.mode === "mobile" && (Game.state === "play" || Game.state === "paused");
+    el.classList.toggle("on", on);
+  }
+
+  function beginMobile() {
+    switchMode("mobile");
+    UI.show("s-boot");
+    if (typeof document !== "undefined") {
+      const camEl = document.getElementById("cam");
+      if (camEl) camEl.classList.add("hidden");
     }
+    updateMobilePads();
+    toast("移动端模式 · 左右轮盘拖动控制手 · 双击轮盘切换抓握");
   }
 
   function switchMode(mode) {
@@ -2291,9 +2421,10 @@
 
   // 进入教学关 / 路段：默认走摄像头；用户明确选过演示模式才用演示
     function enterWithMode(startFn) {
-    if (Game.mode === "demo") {
+    if (Game.mode === "demo" || Game.mode === "mobile") {
       UI.hideAll();
       startFn();
+      updateMobilePads();
       return;
     }
     if (Cam.active) {
@@ -2361,6 +2492,8 @@
       });
     }
     updateModeButtons();
+    Mobile.bind();
+    document.getElementById("btn-mobile").addEventListener("click", () => beginMobile());
     document.getElementById("btn-segments").addEventListener("click", showSegments);
     document.getElementById("btn-seg-back").addEventListener("click", () => UI.show("s-boot"));
     document.getElementById("btn-cam").addEventListener("click", () => beginCamera());
@@ -2500,6 +2633,7 @@
    * ============================================================ */
   Game.startLevel = startLevel;
   Game.startSegment = startSegment;
+  Game.Mobile = Mobile;
   Game.step = stepPhysics;
   Game.respawn = respawn;
   Game.completeLevel = completeLevel;

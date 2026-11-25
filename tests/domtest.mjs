@@ -142,4 +142,20 @@ console.log("转动与伸缩正常（角度连续变化，长度不超臂展）"
 
 console.log("演示键位 X/M/IJKL 正常");
 
+// 移动端模式：切模式后仍留在标题页，进关卡后摇杆输入生效
+const mobBtn = handlers["btn-mobile:click"];
+if (mobBtn) {
+  mobBtn();
+  if (G.mode !== "mobile") { console.log("移动端模式没有切换"); process.exit(1); }
+  G.startLevel(0);
+  if (G.state !== "play" || G.mode !== "mobile") { console.log("移动端进关卡失败"); process.exit(1); }
+  G.Mobile.pads[0].vec = { x: 0.6, y: -0.3 };
+  G.Mobile.pads[0].grip = true;
+  const s1 = G.Input.sample(1 / 120);
+  if (!(Math.hypot(s1.hands[0].dx, s1.hands[0].dy) > 40 && s1.hands[0].closed)) {
+    console.log("移动端摇杆输入异常"); process.exit(1);
+  }
+  console.log("移动端模式正常（摇杆输入 + 抓握）");
+}
+
 console.log("DOM 冒烟测试通过");
