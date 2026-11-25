@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>What's Up? · v0.4.2</title>
+<title>What's Up? · v0.4.3</title>
 <style>
   :root{
     --gold:#e9b96e;
@@ -225,7 +225,7 @@
   /* ============================================================
    * 0. 元信息与常量
    * ============================================================ */
-  const VERSION = "v0.4.2";
+  const VERSION = "v0.4.3";
   const VIEW_W = 1600, VIEW_H = 900;
   const WORLD_W = 3200, WORLD_H = 4400;
   function worldH() { return Game.worldH || WORLD_H; }
@@ -827,11 +827,19 @@
       d.h1.y += ay * sp * dt;
       d.h2.x += bx * sp * dt;
       d.h2.y += by * sp * dt;
+      // 关键：把手的偏移本身也夹在 [MIN_REACH, REACH] 内，
+      // 否则按键会一直累加、超过臂展后被截断，反方向要"倒车"很久才能动
       const norm = (o) => {
         const raw = Math.hypot(o.x, o.y);
+        if (raw < 1) {
+          o.x = 0;
+          o.y = -MIN_REACH;
+          return { dx: 0, dy: -MIN_REACH, len: MIN_REACH };
+        }
         const len = clamp(raw, MIN_REACH, REACH);
-        if (raw < 1) return { dx: 0, dy: -len, len };
-        return { dx: o.x / raw * len, dy: o.y / raw * len, len };
+        o.x = o.x / raw * len;
+        o.y = o.y / raw * len;
+        return { dx: o.x, dy: o.y, len };
       };
       const a1 = norm(d.h1), a2 = norm(d.h2);
       return {

@@ -119,6 +119,19 @@ kd({ key: "i", code: "", preventDefault() {} });
 G.step(1 / 120);
 ku({ key: "i", code: "" });
 if (!(G.demo.h2.y < h2y)) { console.log("I 没有让手 2 上移"); process.exit(1); }
+// 长按方向键：手偏移不应无限累加（松手后要能立刻反向）
+kd({ key: "d", code: "", preventDefault() {} });
+for (let i = 0; i < 480; i++) G.step(1 / 120);
+ku({ key: "d", code: "" });
+const h1len = Math.hypot(G.demo.h1.x, G.demo.h1.y);
+if (h1len > 305) { console.log("手偏移没有夹住: " + h1len.toFixed(0)); process.exit(1); }
+const hx0 = G.demo.h1.x;
+kd({ key: "a", code: "", preventDefault() {} });
+for (let i = 0; i < 60; i++) G.step(1 / 120);
+ku({ key: "a", code: "" });
+if (!(G.demo.h1.x < hx0 - 150)) { console.log("松手后反向按 A 没有立刻移动"); process.exit(1); }
+console.log("长按后反向移动正常（手偏移夹在 300 内）");
+
 console.log("演示键位 X/M/IJKL 正常");
 
 console.log("DOM 冒烟测试通过");
