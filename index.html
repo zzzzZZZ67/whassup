@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>What's Up? · v0.5.1</title>
+<title>What's Up? · v0.5.2</title>
 <style>
   :root{
     --gold:#e9b96e;
@@ -82,6 +82,7 @@
   }
   button.mode-off:hover{background:#0b0a08!important;transform:none}
   .hint{color:var(--muted);font-size:13px;line-height:1.8;margin:6px 0 0}
+  .ver{color:var(--muted);font-size:12px;letter-spacing:.12em;margin:-4px 0 16px}
   .warn{color:#f0a9a9;font-size:13px;line-height:1.6;margin:14px 0 0}
   .keys{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;text-align:left;margin:18px auto 0;max-width:460px;font-size:13.5px;color:var(--muted)}
   .keys kbd{
@@ -167,6 +168,7 @@
     <div class="screen" id="s-boot">
       <p class="kicker">AIE1101 · Vibe Coding</p>
       <h1>What's Up?</h1>
+      <p class="ver" id="boot-ver"></p>
       <p class="sub">用你的身体攀岩。<br>头部是核心，两只手是攀岩者的手——握拳抓住岩点，张开松手。</p>
       <div class="btns">
         <button class="primary" id="btn-cam">摄像头模式</button>
@@ -269,7 +271,7 @@
   /* ============================================================
    * 0. 元信息与常量
    * ============================================================ */
-  const VERSION = "v0.5.1";
+  const VERSION = "v0.5.2";
   const VIEW_W = 1600, VIEW_H = 900;
   const WORLD_W = 3200, WORLD_H = 4400;
   function worldH() { return Game.worldH || WORLD_H; }
@@ -2491,6 +2493,8 @@
       });
     }
     updateModeButtons();
+    const verEl = document.getElementById("boot-ver");
+    if (verEl) verEl.textContent = VERSION + " · 触屏松手不回缩";
     Mobile.bind();
     document.getElementById("btn-mobile").addEventListener("click", () => beginMobile());
     document.getElementById("btn-segments").addEventListener("click", showSegments);
