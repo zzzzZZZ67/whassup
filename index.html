@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>What's Up? · v0.4.4</title>
+<title>What's Up? · v0.4.5</title>
 <style>
   :root{
     --gold:#e9b96e;
@@ -70,6 +70,17 @@
     background:linear-gradient(180deg,#f2c780,#d19a45);color:#2a1a08;border-color:#f2c780;font-weight:700;
   }
   button.primary:hover{background:linear-gradient(180deg,#ffd89b,#e0aa55)}
+  /* 模式选中：选中的变黄，另一个变黑 */
+  button.mode-on{
+    background:linear-gradient(180deg,#f2c780,#d19a45)!important;color:#2a1a08!important;
+    border-color:#f2c780!important;font-weight:700;
+    box-shadow:0 0 0 2px rgba(242,199,128,.35),0 6px 18px rgba(242,199,128,.22);
+  }
+  button.mode-off{
+    background:#0b0a08!important;color:#6f6353!important;
+    border-color:rgba(255,255,255,.08)!important;box-shadow:none;
+  }
+  button.mode-off:hover{background:#0b0a08!important;transform:none}
   .hint{color:var(--muted);font-size:13px;line-height:1.8;margin:6px 0 0}
   .warn{color:#f0a9a9;font-size:13px;line-height:1.6;margin:14px 0 0}
   .keys{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;text-align:left;margin:18px auto 0;max-width:460px;font-size:13.5px;color:var(--muted)}
@@ -225,7 +236,7 @@
   /* ============================================================
    * 0. 元信息与常量
    * ============================================================ */
-  const VERSION = "v0.4.4";
+  const VERSION = "v0.4.5";
   const VIEW_W = 1600, VIEW_H = 900;
   const WORLD_W = 3200, WORLD_H = 4400;
   function worldH() { return Game.worldH || WORLD_H; }
@@ -2228,8 +2239,26 @@
     UI.show("s-segments");
   }
 
+  function updateModeButtons() {
+    if (typeof document === "undefined") return;
+    const cam = document.getElementById("btn-cam");
+    const demo = document.getElementById("btn-demo");
+    if (!cam || !demo) return;
+    const onCam = Game.mode === "camera";
+    const onDemo = Game.mode === "demo";
+    if (cam.classList) {
+      cam.classList.toggle("mode-on", onCam);
+      cam.classList.toggle("mode-off", onDemo);
+    }
+    if (demo.classList) {
+      demo.classList.toggle("mode-on", onDemo);
+      demo.classList.toggle("mode-off", onCam);
+    }
+  }
+
   function switchMode(mode) {
     Game.mode = mode;
+    updateModeButtons();
   }
 
   function beginDemo(startFn) {
@@ -2331,6 +2360,7 @@
         });
       });
     }
+    updateModeButtons();
     document.getElementById("btn-segments").addEventListener("click", showSegments);
     document.getElementById("btn-seg-back").addEventListener("click", () => UI.show("s-boot"));
     document.getElementById("btn-cam").addEventListener("click", () => beginCamera());

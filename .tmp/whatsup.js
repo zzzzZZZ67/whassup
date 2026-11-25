@@ -1,0 +1,2293 @@
+
+(function () {
+  "use strict";
+
+  /* ============================================================
+   * 0. 元信息与常量
+   * ============================================================ */
+  const VERSION = "v0.4.4";
+  const VIEW_W = 1600, VIEW_H = 900;
+  const WORLD_W = 3200, WORLD_H = 4400;
+  function worldH() { return Game.worldH || WORLD_H; }
+
+  const DT = 1 / 120;                 // 固定物理步长
+  const GRAVITY = 1500;               // 松手后的下落加速度（有质量）
+  const MAX_SPEED = 3000;             // 松手后保留的最大速度
+  const THROW_BOOST = 1.6;            // 松手瞬间的惯性加成（>300px/s 才生效）
+  const AIR_DRAG = 0.2;              // 空中阻力（越小越飘）
+  const FRICTION = 22;                // 平台摩擦（落地后横向速度衰减）
+  const CORE_R = 14;
+  const REACH = 300;                  // 臂展极限（手相对黄点的最大距离）
+  const MIN_REACH = 40;               // 手与核心的最小距离（手不能贴到身体上）
+  const HAND_R = 42;                 // 手部判定半径（可见的判定圈）
+  const GRAB = 42;                   // 抓取判定 = 手部黄圈半径
+  const CHECK_R = 70;
+  const SUMMIT_R = 80;
+  const CAM_FOLLOW = 6.5;
+
+  const CAM_SCALE = 1000;             // 手相对画面中心的归一化偏移 → 世界像素
+  const CAM_CENTER = 0.5;             // 黄点在画面中的归一化位置（正中）
+
+  const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const dist = (ax, ay, bx, by) => Math.hypot(ax - bx, ay - by);
+
+  function rectDist(px, py, r) {
+    const nx = clamp(px, r.x, r.x + r.w);
+    const ny = clamp(py, r.y, r.y + r.h);
+    return Math.hypot(px - nx, py - ny);
+  }
+  function nearestOnRect(px, py, r) {
+    return { x: clamp(px, r.x, r.x + r.w), y: clamp(py, r.y, r.y + r.h) };
+  }
+
+  /* ============================================================
+   * 1. 关卡数据
+   * ============================================================ */
+  // 平台都是"抓取范围 = 整个矩形"，检查点必须绑定在一个平台上。
+  // 可玩的路段（每段都是一张短地图，终点在最后一块平台上）
+  const SEGMENT_DEFS = [
+    { name: "长臂", stars: 1, desc: "三块等高的平台，间距接近臂展，练最长距离的抓取。",
+      plats: [[700, 3400, 150], [1040, 3400, 150], [1380, 3400, 150]],
+      ropes: [], boosts: [], movers: [] },
+    { name: "垂绳", stars: 2, desc: "一根竖直垂下的绳索，双手交替一节节往上挪，到顶后横移到平台。",
+      startX: 630,
+      plats: [[500, 2500, 150]],
+      ropes: [{ x: 720, from: 3400, to: 2600, step: 80, vertical: true }], boosts: [], movers: [] },
+    { name: "绳桥", stars: 2, desc: "5 个绳节点横跨 600px，双手交替挪过去。",
+      plats: [[650, 3400, 140], [1500, 3400, 150]],
+      ropes: [{ y: 3300, from: 900, to: 1380, step: 120 }], boosts: [], movers: [] },
+    { name: "上升气流", stars: 2, desc: "上层高出 1000px，只能踩金色气流弹上去。",
+      plats: [[650, 3400, 140], [650, 2400, 140], [1100, 2300, 150]],
+      ropes: [], boosts: [{ x: 660, y: 3260, w: 140, h: 150, power: 2050 }], movers: [] },
+    { name: "升降梯", stars: 3, desc: "垂直移动平台，等它升到合适高度再抓。",
+      plats: [[650, 3400, 140], [1350, 2900, 150]],
+      ropes: [], boosts: [],
+      movers: [{ x: 1000, y: 3300, w: 150, h: 24, axis: "y", range: 420, speed: 0.7, phase: 0 }] },
+    { name: "摆渡船", stars: 3, desc: "水平移动平台横渡 700px 河面，注意下船时机。",
+      plats: [[650, 3400, 140], [1900, 3300, 150]],
+      ropes: [], boosts: [],
+      movers: [{ x: 1000, y: 3350, w: 150, h: 24, axis: "x", range: 380, speed: 0.8, phase: 0 }] },
+    { name: "绳上转体", stars: 3, desc: "绳节点紧贴窄台，在绳上换手再抓台。",
+      plats: [[650, 3400, 140], [1300, 3300, 90]],
+      ropes: [{ y: 3300, from: 860, to: 1220, step: 90 }], boosts: [], movers: [] },
+    { name: "气流接力", stars: 4, desc: "两段气流叠高，路上有石头可以借力。",
+      plats: [[650, 3400, 140], [1200, 2600, 140], [1200, 1900, 150]],
+      rocks: [[900, 3300], [1180, 3050], [1000, 2800], [1180, 2300], [1050, 2100]],
+      ropes: [],
+      boosts: [
+        { x: 660, y: 3260, w: 140, h: 150, power: 1950 },
+        { x: 1210, y: 2460, w: 130, h: 150, power: 1950 }
+      ], movers: [] },
+    { name: "移动靶", stars: 4, desc: "移动平台与绳索交错，抓移动平台边缘再荡。",
+      plats: [[650, 3400, 140], [1700, 2900, 150]],
+      ropes: [{ y: 3200, from: 900, to: 1200, step: 100 }],
+      boosts: [],
+      movers: [{ x: 1300, y: 3100, w: 140, h: 24, axis: "x", range: 260, speed: 0.9, phase: 0.5 }] },
+    { name: "最后一段", stars: 5, desc: "绳索 → 气流 → 移动平台三连，通关前最后一关。",
+      plats: [[650, 3400, 140], [1500, 3300, 150], [1500, 2400, 140], [2130, 2300, 150]],
+      ropes: [{ y: 3300, from: 860, to: 1380, step: 120 }],
+      boosts: [{ x: 1510, y: 3160, w: 130, h: 150, power: 1950 }],
+      movers: [{ x: 1800, y: 2350, w: 140, h: 24, axis: "x", range: 200, speed: 0.9, phase: 0 }] },
+
+    // ===== 以下 10 段为新增（待检查） =====
+    { name: "高墙", stars: 2, desc: "一堵高墙，靠三块突出的石头一级级往上抓。",
+      plats: [[650, 2600, 160]],
+      rocks: [[700, 3300], [800, 3050], [700, 2800]],
+      ropes: [], boosts: [], movers: [] },
+    { name: "之字", stars: 3, desc: "左右交错的窄台，每次都要横跨 300px。",
+      plats: [[650, 3400, 120], [950, 3200, 120], [650, 3000, 120], [950, 2800, 120], [650, 2600, 150]],
+      ropes: [], boosts: [], movers: [] },
+    { name: "窄柱", stars: 4, desc: "只有 60px 宽的窄柱，抓点要非常准。",
+      plats: [[700, 3300, 60], [960, 3100, 60], [700, 2900, 60], [960, 2700, 150]],
+      ropes: [], boosts: [], movers: [] },
+    { name: "斜壁", stars: 3, desc: "先跳下去，再沿斜面爬回高处。",
+      plats: [[650, 3400, 140], [950, 3550, 140], [1300, 3350, 140], [1300, 3000, 150]],
+      ropes: [], boosts: [], movers: [] },
+    { name: "双梯", stars: 3, desc: "两台垂直升降梯，换乘时别掉下去。",
+      plats: [[650, 3400, 140], [1500, 2600, 150]],
+      ropes: [], boosts: [],
+      movers: [
+        { x: 1000, y: 3300, w: 140, h: 24, axis: "y", range: 400, speed: 0.7, phase: 0 },
+        { x: 1300, y: 3100, w: 140, h: 24, axis: "y", range: 400, speed: 0.9, phase: 1.4 }
+      ] },
+    { name: "双绳", stars: 4, desc: "两根错开的竖绳，爬到一半要换绳。",
+      plats: [[1000, 2450, 150]],
+      ropes: [
+        { x: 720, from: 3400, to: 3000, step: 80, vertical: true },
+        { x: 1100, from: 2900, to: 2500, step: 80, vertical: true }
+      ], boosts: [], movers: [] },
+    { name: "气绳", stars: 4, desc: "被气流弹上高空，抓住半空的绳子，再横移到平台。",
+      plats: [[650, 3400, 140], [900, 2050, 150]],
+      ropes: [{ x: 760, from: 2900, to: 2100, step: 80, vertical: true }],
+      boosts: [{ x: 660, y: 3260, w: 140, h: 150, power: 2200 }], movers: [] },
+    { name: "摆渡连跳", stars: 4, desc: "两台水平移动平台接力横渡。",
+      plats: [[650, 3400, 140], [1950, 3200, 150]],
+      ropes: [], boosts: [],
+      movers: [
+        { x: 900, y: 3350, w: 140, h: 24, axis: "x", range: 300, speed: 0.8, phase: 0 },
+        { x: 1500, y: 3300, w: 130, h: 24, axis: "x", range: 260, speed: 0.9, phase: 1.1 }
+      ] },
+    { name: "电梯井", stars: 2, desc: "一部缓慢上升的电梯，把你送到高台。",
+      plats: [[650, 3400, 140], [650, 2400, 150]],
+      ropes: [], boosts: [],
+      movers: [{ x: 1000, y: 3300, w: 150, h: 24, axis: "y", range: 520, speed: 0.6, phase: 0 }] },
+    { name: "终极", stars: 5, desc: "绳索 → 气流 → 移动平台 → 窄台，四连综合。",
+      plats: [[650, 3400, 140], [1400, 3300, 140], [1400, 2400, 140], [2000, 2300, 150]],
+      ropes: [{ y: 3300, from: 860, to: 1360, step: 120 }],
+      boosts: [{ x: 1410, y: 3160, w: 130, h: 150, power: 1950 }],
+      movers: [{ x: 1750, y: 2350, w: 140, h: 24, axis: "x", range: 250, speed: 0.9, phase: 0 }] }
+  ];
+
+  const SEGMENTS = SEGMENT_DEFS.map((d, i) => ({ id: i + 1, name: d.name, stars: d.stars, tags: d.ropes.length ? ["绳索"] : d.boosts.length ? ["气流"] : d.movers.length ? ["移动平台"] : ["平台"], desc: d.desc }));
+
+
+  /* ============================================================
+   * 4.5 关卡生成器（层 = 3 个路段 + 层末检查点，左右交替）
+   * ============================================================ */
+  const GEN_SPECS = [
+    { name: "关卡 1", layers: 3, avg: 2.5 },
+    { name: "关卡 2", layers: 3, avg: 2.8 },
+    { name: "关卡 3", layers: 4, avg: 2.8 },
+    { name: "关卡 4", layers: 4, avg: 3.0 },
+    { name: "关卡 5", layers: 5, avg: 3.0 },
+    { name: "终极困难", layers: 10, avg: 3.5, hard: true }
+  ];
+
+  const SEG_KIND = {
+    "长臂": "gap", "之字": "zig", "高墙": "rocks", "窄柱": "narrow", "斜壁": "diag",
+    "垂绳": "vrope", "绳桥": "rope", "绳上转体": "rope", "双绳": "rope",
+    "上升气流": "boost", "气流接力": "boost", "气绳": "boost",
+    "升降梯": "vmover", "双梯": "vmover", "电梯井": "vmover",
+    "摆渡船": "hmover", "摆渡连跳": "hmover", "移动靶": "hmover",
+    "最后一段": "combo", "终极": "combo"
+  };
+
+  function addPlat(list, cx, cy, w) {
+    const pl = { x: cx - w / 2, y: cy, w, h: 26 };
+    list.push(pl);
+    return pl;
+  }
+
+  // 每个模块：从 (x, y) 站姿出发，向 dir 方向推进，返回新的站姿 {x, y}
+  function buildModule(kind, x, y, dir, out) {
+    const P = out.platforms, R = out.ropes, B = out.boosts, M = out.movers, Q = out.rocks;
+    const d = dir;
+    if (kind === "gap") {
+      addPlat(P, x, y, 150);
+      const bx = x + d * 300;
+      addPlat(P, bx, y - 40, 150);
+      return { x: bx, y: y - 40 };
+    }
+    if (kind === "zig") {
+      addPlat(P, x, y, 130);
+      addPlat(P, x + d * 260, y - 110, 130);
+      return { x: x + d * 260, y: y - 110 };
+    }
+    if (kind === "narrow") {
+      addPlat(P, x, y, 60);
+      addPlat(P, x + d * 240, y - 120, 60);
+      return { x: x + d * 240, y: y - 120 };
+    }
+    if (kind === "diag") {
+      addPlat(P, x, y, 140);
+      addPlat(P, x + d * 280, y + 90, 140);          // 先降
+      addPlat(P, x + d * 520, y - 60, 150);          // 再爬
+      return { x: x + d * 520, y: y - 60 };
+    }
+    if (kind === "rocks") {
+      addPlat(P, x, y, 140);
+      Q.push({ x: x + d * 70, y: y - 130, r: 22 });
+      Q.push({ x: x - d * 10, y: y - 250, r: 22 });
+      addPlat(P, x + d * 120, y - 340, 150);
+      return { x: x + d * 120, y: y - 340 };
+    }
+    if (kind === "rope") {
+      addPlat(P, x, y, 140);
+      const bx = x + d * 460;
+      addPlat(P, bx, y - 50, 150);
+      const nodes = [];
+      for (let k = 1; k <= 4; k++) nodes.push({ x: x + d * k * 90, y: y - 110, r: 18 });
+      R.push({ nodes });
+      return { x: bx, y: y - 50 };
+    }
+    if (kind === "vrope") {
+      addPlat(P, x, y, 140);
+      const tx = x + d * 170, ty = y - 300;
+      addPlat(P, tx, ty, 150);
+      const nodes = [];
+      for (let k = 1; k <= 3; k++) nodes.push({ x: x + d * 30, y: y - 60 - k * 70, r: 18 });
+      R.push({ nodes });
+      return { x: tx, y: ty };
+    }
+    if (kind === "boost") {
+      addPlat(P, x, y, 140);
+      B.push({ x: x - 55, y: y - 120, w: 110, h: 120, power: 900, dir: { x: 0, y: -1 } });
+      const bx = x + d * 210, by = y - 320;
+      addPlat(P, bx, by, 150);
+      return { x: bx, y: by };
+    }
+    if (kind === "vmover") {
+      addPlat(P, x, y, 140);
+      const bx = x + d * 320, by = y - 300;
+      M.push({ x: x + d * 150, y: y - 180, w: 130, h: 24, baseX: x + d * 150, baseY: y - 180, mover: { axis: "y", range: 110, speed: 0.8, phase: 0 } });
+      addPlat(P, bx, by, 150);
+      return { x: bx, y: by };
+    }
+    if (kind === "hmover") {
+      addPlat(P, x, y, 140);
+      const bx = x + d * 540;
+      addPlat(P, bx, y - 40, 150);
+      M.push({ x: x + d * 270, y: y - 60, w: 130, h: 24, baseX: x + d * 270, baseY: y - 60, mover: { axis: "x", range: 150, speed: 0.8, phase: 0 } });
+      return { x: bx, y: y - 40 };
+    }
+    if (kind === "combo") {
+      addPlat(P, x, y, 140);
+      const bx = x + d * 520;
+      addPlat(P, bx, y - 60, 150);
+      const nodes = [];
+      for (let k = 1; k <= 3; k++) nodes.push({ x: x + d * k * 120, y: y - 120, r: 18 });
+      R.push({ nodes });
+      B.push({ x: bx - 55, y: y - 180, w: 110, h: 110, power: 700, dir: { x: 0, y: -1 } });
+      return { x: bx, y: y - 60 };
+    }
+    // fallback
+    addPlat(P, x, y, 150);
+    return { x, y };
+  }
+
+  function pickLayerSegs(targetSum, used) {
+    let best = null;
+    for (let i = 0; i < SEGMENT_DEFS.length; i++) {
+      for (let j = i + 1; j < SEGMENT_DEFS.length; j++) {
+        for (let k = j + 1; k < SEGMENT_DEFS.length; k++) {
+          const sum = SEGMENT_DEFS[i].stars + SEGMENT_DEFS[j].stars + SEGMENT_DEFS[k].stars;
+          const rep = (used.has(i) ? 1 : 0) + (used.has(j) ? 1 : 0) + (used.has(k) ? 1 : 0);
+          const score = Math.abs(sum - targetSum) * 10 + rep * 6;
+          if (!best || score < best.score) best = { score, picks: [i, j, k], sum };
+        }
+      }
+    }
+    return best;
+  }
+
+  function buildGenerated(spec, index) {
+    const platforms = [], ropes = [], boosts = [], movers = [], rocks = [];
+    const cps = [];
+    const layerStep = 1500;                       // 层与层之间的竖直间隔（远大于臂展）
+    const worldH0 = 1500 + spec.layers * layerStep;
+    const startY = worldH0 - 700;
+    platforms.push({ x: 0, y: worldH0 - 120, w: WORLD_W, h: 40, ground: true });
+    const used = new Set();
+    const layerInfo = [];
+    let prevEndX = 900;
+
+    for (let l = 0; l < spec.layers; l++) {
+      const yL = startY - l * layerStep;
+      const dir = l % 2 === 0 ? 1 : -1;
+      const x0 = l === 0 ? 900 : clamp(prevEndX, 380, WORLD_W - 380);
+      // 层初检查点平台
+      addPlat(platforms, x0, yL, 200);
+      cps.push({ platform: platforms.length - 1, layer: l, kind: "start", teleportTo: null });
+      // 每层 3 个路段
+      const t = spec.layers === 1 ? 0 : (l / (spec.layers - 1) - 0.5);
+      const layerAvg = spec.avg + t * 0.5;
+      const pick = pickLayerSegs(Math.round(layerAvg * 3), used);
+      pick.picks.forEach((i) => used.add(i));
+      layerInfo.push({ avg: pick.sum / 3, segs: pick.picks.map((i) => SEGMENT_DEFS[i].name) });
+      let x = x0, y = yL;
+      for (const si of pick.picks) {
+        const kind = SEG_KIND[SEGMENT_DEFS[si].name] || "gap";
+        const out = buildModule(kind, x, y, dir, { platforms, ropes, boosts, movers, rocks });
+        x = out.x; y = out.y;
+      }
+      // 层末检查点平台
+      addPlat(platforms, x, y, 220);
+      cps.push({ platform: platforms.length - 1, layer: l, kind: "end", teleportTo: null });
+      if (l < spec.layers - 1) cps[cps.length - 1].teleportTo = cps.length;   // 下一层层初
+      prevEndX = x;
+    }
+
+    const last = platforms[platforms.length - 1];
+    const summit = { x: last.x + last.w / 2, y: last.y - 26, r: 26 };
+    const checkpoints = cps.map((cp) => {
+      const pl = platforms[cp.platform];
+      const cx = pl.x + pl.w / 2;
+      return {
+        x: cx,
+        y: pl.y,
+        layer: cp.layer,
+        kind: cp.kind,
+        teleportTo: cp.teleportTo,
+        trigger: { x: cx, y: pl.y - 46, r: CHECK_R },
+        spawn: { x: cx, y: pl.y - CORE_R - 2 },
+        activated: false
+      };
+    });
+    const avg = layerInfo.reduce((a, l) => a + l.avg, 0) / layerInfo.length;
+    return {
+      index,
+      isSegment: false,
+      generated: true,
+      worldH: worldH0,
+      name: spec.name,
+      hint: spec.layers + " 层 · 平均 " + avg.toFixed(1) + " 星 · 层末传送到下一层",
+      platforms,
+      movers,
+      rocks,
+      ropes,
+      boosts,
+      checkpoints,
+      summit,
+      start: { x: checkpoints[0].spawn.x, y: checkpoints[0].spawn.y },
+      layers: layerInfo
+    };
+  }
+
+  const GEN_LEVELS = GEN_SPECS.map((spec, i) => buildGenerated(spec, i));
+
+  const LEVEL_DEFS = [
+    {
+      name: "起步",
+      hint: "平台变少了，横向距离变大：抓住边缘后收手，再绕到外侧升上去。",
+      platforms: [[700, 3380, 140], [1060, 3260, 140], [1420, 3140, 140], [1780, 3020, 140], [2140, 2900, 140]],
+      startX: 580,
+      cps: [3],
+      rocks: [[450, 3200], [1800, 2800]],
+      ropes: [], boosts: [], movers: []
+    },
+    {
+      name: "荡绳",
+      hint: "中间的空隙太宽，必须抓住绳索节点，双手交替挪过去。",
+      platforms: [[650, 3380, 150], [1500, 3380, 150], [1900, 3260, 140], [2200, 3140, 140]],
+      startX: 530,
+      cps: [2],
+      rocks: [[450, 3200]],
+      ropes: [{ y: 3300, from: 900, to: 1380, step: 120 }],
+      boosts: [], movers: []
+    },
+    {
+      name: "加速带",
+      hint: "上面那层离得太高，必须站到金色气流上，松手被弹上去。",
+      platforms: [[650, 3380, 150], [650, 2380, 150], [1100, 2260, 140]],
+      startX: 530,
+      cps: [2],
+      rocks: [[450, 3200]],
+      ropes: [],
+      boosts: [{ x: 660, y: 3240, w: 140, h: 150, power: 2050 }],
+      movers: []
+    },
+    {
+      name: "移动平台",
+      hint: "本关靠移动平台过河：站上去，等它把你带过去。",
+      platforms: [[650, 3380, 140], [1700, 3300, 150], [2200, 2500, 150]],
+      startX: 530,
+      cps: [2],
+      rocks: [[450, 3200]],
+      ropes: [],
+      boosts: [],
+      movers: [
+        { x: 1000, y: 3300, w: 150, h: 24, axis: "x", range: 320, speed: 0.9, phase: 0 },
+        { x: 2050, y: 3000, w: 140, h: 24, axis: "y", range: 380, speed: 0.8, phase: 1.2 }
+      ]
+    },
+    {
+      name: "登顶",
+      hint: "绳索、气流、移动平台全上，最后一关。",
+      platforms: [[650, 3380, 140], [1500, 3300, 150], [1500, 2400, 150], [2350, 2300, 150]],
+      startX: 420,
+      cps: [2],
+      rocks: [[450, 3200]],
+      ropes: [{ y: 3300, from: 880, to: 1360, step: 120 }],
+      boosts: [{ x: 1510, y: 3160, w: 130, h: 150, power: 1900 }],
+      movers: [{ x: 2000, y: 2350, w: 140, h: 24, axis: "x", range: 250, speed: 0.9, phase: 0 }]
+    }
+  ];
+
+  function buildLevel(def, index, isSegment) {
+    const startX = def.startX || 370;
+    const plats = def.platforms || def.plats || [];
+    const platforms = [{ x: 0, y: 4160, w: WORLD_W, h: 40, ground: true }];
+    // 出发平台：站在平台上开始，地面只是"掉下去的兜底"
+    const startPlat = { x: startX - 70, y: 3500, w: 140, h: 24, startPlat: true };
+    platforms.push(startPlat);
+    const base = platforms.length;
+
+    for (const [x, y, w] of plats) platforms.push({ x, y, w, h: 26 });
+    const last = platforms[platforms.length - 1];
+
+    const movers = (def.movers || []).map((m) => {
+      const plat = { x: m.x, y: m.y, w: m.w, h: m.h, baseX: m.x, baseY: m.y, mover: m };
+      platforms.push(plat);
+      return plat;
+    });
+
+    const summit = { x: last.x + last.w / 2, y: last.y - 26, r: 26 };
+
+    const rocks = (def.rocks || []).map(([x, y]) => ({ x, y, r: 22 }));
+
+    const ropes = (def.ropes || []).map((r) => {
+      const nodes = [];
+      if (r.vertical) {
+        const a = Math.min(r.from, r.to), b = Math.max(r.from, r.to);
+        for (let y = a; y <= b; y += Math.abs(r.step)) nodes.push({ x: r.x, y, r: 18 });
+      } else {
+        const a = Math.min(r.from, r.to), b = Math.max(r.from, r.to);
+        for (let x = a; x <= b; x += Math.abs(r.step)) nodes.push({ x, y: r.y, r: 18 });
+      }
+      return { nodes };
+    });
+
+    const boosts = (def.boosts || []).map((b) => ({ ...b, dir: { x: 0, y: -1 } }));
+
+    const checkpoints = [{ x: startX, platform: 1 }].concat(
+      (def.cps || []).map((pi) => ({ x: platforms[base + pi].x + platforms[base + pi].w / 2, platform: base + pi }))
+    );
+    const cps = checkpoints.map((cp) => {
+      const p = platforms[cp.platform];
+      const x = clamp(cp.x, p.x + 24, p.x + p.w - 24);
+      return {
+        x,
+        y: p.y,
+        trigger: { x, y: p.y - 46, r: CHECK_R },
+        spawn: { x, y: p.y - CORE_R - 2 },
+        activated: false
+      };
+    });
+
+    return {
+      index,
+      isSegment: !!isSegment,
+      name: def.name,
+      hint: def.hint || def.desc || "",
+      platforms,
+      movers,
+      rocks,
+      ropes,
+      boosts,
+      checkpoints: cps,
+      summit,
+      start: { x: startX, y: startPlat.y - CORE_R - 2 }
+    };
+  }
+
+  function totalLevels() { return LEVEL_DEFS.length + GEN_LEVELS.length; }
+  function makeLevel(index) {
+    if (index >= LEVEL_DEFS.length) return GEN_LEVELS[index - LEVEL_DEFS.length];
+    return buildLevel(LEVEL_DEFS[index], index, false);
+  }
+  function makeSegment(index) { return buildLevel(SEGMENT_DEFS[index], index, true); }
+
+  /* ============================================================
+   * 2. 游戏状态
+   * ============================================================ */
+  function makeHand(x, y) {
+    return {
+      x, y, fixed: false, anchorX: 0, anchorY: 0,
+      closed: false, wasClosed: false, attached: null,
+      missT: 0, nearT: 0, flashT: 0
+    };
+  }
+
+  const Game = {
+    version: VERSION,
+    state: "boot",            // boot | play | paused | result
+    mode: null,               // null=未选择（默认走摄像头） | demo | camera
+    levelIndex: 0,
+    level: null,
+    core: { x: 980, y: 3546, vx: 0, vy: 0, r: CORE_R },
+    hands: [makeHand(860, 3400), makeHand(1100, 3400)],
+    cam: 0,
+    camX: 0,
+    time: 0,
+    respawns: 0,
+    cpIndex: -1,
+    hintT: 0,
+    fade: 0,
+    shake: 0,
+    camera: {
+      active: false,
+      ready: false,
+      hands: [null, null],
+      lastTs: 0
+    },
+    input: {
+      mouse: { x: 980, y: 400 },
+      prevMouse: { x: 980, y: 400 },
+      buttons: [false, false]
+    },
+    fx: [],
+    boostCd: 0,
+    inBoost: false,
+    demo: {
+      h1: { x: -140, y: -70 },
+      h2: { x: 140, y: -70 },
+      c1: false,
+      c2: false,
+      keys: {}
+    },
+    stats: { best: null }
+  };
+
+  /* ============================================================
+   * 3. 音频（无外部素材，全部合成）
+   * ============================================================ */
+  const Sfx = {
+    ctx: null,
+    muted: false,
+    ensure() {
+      if (this.ctx) return;
+      const AC = (typeof window !== "undefined") && (window.AudioContext || window.webkitAudioContext);
+      if (!AC) return;
+      try { this.ctx = new AC(); } catch (e) { this.ctx = null; }
+    },
+    tone(freq, dur, type, vol, delay) {
+      if (this.muted || !this.ctx) return;
+      const t0 = this.ctx.currentTime + (delay || 0);
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.type = type || "sine";
+      osc.frequency.setValueAtTime(freq, t0);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(vol || 0.06, t0 + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      osc.connect(g); g.connect(this.ctx.destination);
+      osc.start(t0); osc.stop(t0 + dur + 0.02);
+    },
+    grab() { this.tone(620, 0.09, "triangle", 0.07); },
+    release() { this.tone(320, 0.08, "sine", 0.05); },
+    miss() { this.tone(180, 0.09, "sawtooth", 0.03); },
+    checkpoint() { this.tone(760, 0.12, "triangle", 0.06); this.tone(1140, 0.16, "triangle", 0.05, 0.09); },
+    clear() { [523, 659, 784, 1046].forEach((f, i) => this.tone(f, 0.35, "triangle", 0.06, i * 0.12)); },
+    respawn() { this.tone(420, 0.12, "sine", 0.05); this.tone(300, 0.16, "sine", 0.04, 0.08); }
+  };
+
+  /* ============================================================
+   * 4. 输入采样
+   * ============================================================ */
+  const Input = {
+    // 返回：{ hands:[{dx,dy,len,closed}] }，dx/dy 是"手相对黄点"的偏移（世界像素）
+    sample(dt) {
+      const g = Game;
+      if (g.mode === "camera" && !g.camera.ready) {
+        return {
+          hands: [
+            { dx: -80, dy: -120, len: 144, closed: false },
+            { dx: 80, dy: -120, len: 144, closed: false }
+          ]
+        };
+      }
+      if (g.mode === "camera" && g.camera.ready) {
+        const c = g.camera;
+        const hands = [0, 1].map((i) => {
+          const h = c.hands[i];
+          if (!h) return { dx: 0, dy: -140, len: 140, closed: true, lost: true };
+          // 手在画面里的位置相对黄点（正中）的偏移
+          const ox = (h.x - CAM_CENTER) * CAM_SCALE;
+          const oy = (h.y - CAM_CENTER) * CAM_SCALE;
+          const raw = Math.hypot(ox, oy);
+          const len = clamp(raw, MIN_REACH, REACH);
+          const k = len / (raw || 1);
+          const ddx = raw < 1 ? 0 : ox * k;
+          const ddy = raw < 1 ? -len : oy * k;
+          return { dx: ddx, dy: ddy, len, closed: !!h.closed, lost: false };
+        });
+        return { hands };
+      }
+
+      // 演示模式：WASD 移动手1，IJKL 移动手2，X/M 切换左右手抓握
+      const d = g.demo;
+      const kk = d.keys;
+      // 手 1：A/D 转动手臂，W/S 伸长/缩短
+      // 手 2：J/L 转动，I/K 伸长/缩短
+      const rot1 = (kk.d ? 1 : 0) - (kk.a ? 1 : 0);
+      const ext1 = (kk.w ? 1 : 0) - (kk.s ? 1 : 0);
+      const rot2 = (kk.l ? 1 : 0) - (kk.j ? 1 : 0);
+      const ext2 = (kk.i ? 1 : 0) - (kk.k ? 1 : 0);
+      const ROT_SPEED = 3.0;                // rad/s ≈ 172°/s
+      const LEN_SPEED = 520;                // px/s
+      const moveHand = (h, rot, ext) => {
+        let l = Math.hypot(h.x, h.y);
+        if (l < 1) { h.x = 0; h.y = -MIN_REACH; l = MIN_REACH; }
+        let a = Math.atan2(h.y, h.x) + rot * ROT_SPEED * dt;
+        l = clamp(l + ext * LEN_SPEED * dt, MIN_REACH, REACH);
+        h.x = Math.cos(a) * l;
+        h.y = Math.sin(a) * l;
+      };
+      moveHand(d.h1, rot1, ext1);
+      moveHand(d.h2, rot2, ext2);
+      const rawOf = (o) => {
+        const raw = Math.hypot(o.x, o.y);
+        if (raw < 1) return { dx: 0, dy: -MIN_REACH, len: MIN_REACH };
+        const len = clamp(raw, MIN_REACH, REACH);
+        return { dx: o.x / raw * len, dy: o.y / raw * len, len };
+      };
+      const a1 = rawOf(d.h1), a2 = rawOf(d.h2);
+      return {
+        hands: [
+          { dx: a1.dx, dy: a1.dy, len: a1.len, closed: !!d.c1 },
+          { dx: a2.dx, dy: a2.dy, len: a2.len, closed: !!d.c2 }
+        ]
+      };
+    }
+  };
+
+  /* ============================================================
+   * 5. 物理与规则
+   * ============================================================ */
+  function anyFixed() {
+    return Game.hands.some((h) => h.fixed);
+  }
+
+  function fixedHands() {
+    return Game.hands.filter((h) => h.fixed);
+  }
+
+  function findGrab(x, y) {
+    const L = Game.level;
+    let best = null, bestD = Infinity;
+
+    for (const p of L.platforms) {
+      if (p.ground) continue;            // 地面不可抓，避免从地面乱爬跳关
+      const d = rectDist(x, y, p);
+      if (d <= GRAB && d < bestD) {
+        bestD = d;
+        best = { type: "platform", ref: p, point: nearestOnRect(x, y, p) };
+      }
+    }
+    for (const r of L.rocks) {
+      const d = Math.hypot(x - r.x, y - r.y) - r.r;
+      if (d <= GRAB && d < bestD) {
+        const dx = x - r.x, dy = y - r.y;
+        const l = Math.hypot(dx, dy) || 1;
+        bestD = d;
+        best = {
+          type: "rock", ref: r,
+          point: { x: r.x + (dx / l) * r.r, y: r.y + (dy / l) * r.r }
+        };
+      }
+    }
+    for (const rope of L.ropes) {
+      for (const n of rope.nodes) {
+        const d = Math.hypot(x - n.x, y - n.y) - n.r;
+        if (d <= GRAB && d < bestD) {
+          const dx = x - n.x, dy = y - n.y;
+          const l = Math.hypot(dx, dy) || 1;
+          bestD = d;
+          best = {
+            type: "rope", ref: n,
+            point: { x: n.x + (dx / l) * n.r, y: n.y + (dy / l) * n.r }
+          };
+        }
+      }
+    }
+    return best;
+  }
+
+  function tryGrab(h) {
+    if (h.fixed) return;
+    const hit = findGrab(h.x, h.y);
+    if (!hit) {
+      h.missT = 0.22;
+      Sfx.miss();
+      return;
+    }
+    h.fixed = true;
+    h.anchorX = h.x;
+    h.anchorY = h.y;
+    h.attached = hit;
+    h.flashT = 0.25;
+    Sfx.grab();
+  }
+
+  function boostAt(x, y) {
+    for (const b of Game.level.boosts) {
+      if (x > b.x && x < b.x + b.w && y > b.y && y < b.y + b.h) return b;
+    }
+    return null;
+  }
+
+  function launchBoost(b) {
+    const c = Game.core;
+    c.vy = -b.power;
+    c.vx = 0;
+    Game.boostCd = 0.2;
+    Game.inBoost = true;
+    addFx(c.x, c.y, "boost");
+    Sfx.release();
+  }
+
+  function releaseHand(h) {
+    if (!h.fixed) return;
+    h.fixed = false;
+    h.attached = null;
+    // 在金色气流里松手 → 被弹上去
+    const b = boostAt(Game.core.x, Game.core.y);
+    if (b) launchBoost(b);
+    // 松手瞬间把运动速度放大一点，让"甩出去"更明显
+    const c = Game.core;
+    if (Math.hypot(c.vx, c.vy) > 300) {
+      // 见 THROW_BOOST：松手时把速度放大
+      c.vx = clamp(c.vx * THROW_BOOST, -MAX_SPEED, MAX_SPEED);
+      c.vy = clamp(c.vy * THROW_BOOST, -MAX_SPEED, MAX_SPEED);
+    }
+    Sfx.release();
+  }
+
+  function collideCore() {
+    const g = Game, L = g.level, c = g.core;
+    for (const p of L.platforms) {
+      const nx = clamp(c.x, p.x, p.x + p.w);
+      const ny = clamp(c.y, p.y, p.y + p.h);
+      let dx = c.x - nx, dy = c.y - ny;
+      let d = Math.hypot(dx, dy);
+      if (d < c.r) {
+        if (d < 0.0001) {
+          // 圆心在矩形内部：沿最近边推出
+          const left = c.x - p.x, right = p.x + p.w - c.x;
+          const top = c.y - p.y, bottom = p.y + p.h - c.y;
+          const m = Math.min(left, right, top, bottom);
+          if (m === left) { c.x = p.x - c.r; c.vx = Math.min(c.vx, 0); }
+          else if (m === right) { c.x = p.x + p.w + c.r; c.vx = Math.max(c.vx, 0); }
+          else if (m === top) { c.y = p.y - c.r; c.vy = Math.min(c.vy, 0); c.grounded = true; }
+          else { c.y = p.y + p.h + c.r; c.vy = Math.max(c.vy, 0); }
+        } else {
+          const ux = dx / d, uy = dy / d;
+          const push = c.r - d;
+          c.x += ux * push;
+          c.y += uy * push;
+          const vn = c.vx * ux + c.vy * uy;
+          if (vn < 0) {
+            // 完全吸收法向速度（不再弹跳），横向摩擦交给 stepPhysics
+            c.vx -= vn * ux;
+            c.vy -= vn * uy;
+            if (uy < -0.6) c.grounded = true;
+          }
+        }
+      }
+    }
+    for (const r of L.rocks) {
+      const dx = c.x - r.x, dy = c.y - r.y;
+      const d = Math.hypot(dx, dy);
+      const min = c.r + r.r;
+      if (d < min && d > 0.0001) {
+        const ux = dx / d, uy = dy / d;
+        c.x = r.x + ux * min;
+        c.y = r.y + uy * min;
+        const vn = c.vx * ux + c.vy * uy;
+        if (vn < 0) {
+          c.vx -= vn * ux;
+          c.vy -= vn * uy;
+        }
+      }
+    }
+    // 世界边界
+    if (c.x < c.r) { c.x = c.r; if (c.vx < 0) c.vx = 0; }
+    if (c.x > WORLD_W - c.r) { c.x = WORLD_W - c.r; if (c.vx > 0) c.vx = 0; }
+    if (c.y > worldH() - c.r) { c.y = worldH() - c.r; if (c.vy > 0) c.vy = 0; }
+    if (c.y < c.r) { c.y = c.r; if (c.vy < 0) c.vy = 0; }
+  }
+
+  // 把核心推出平台：沿"上一帧位置"的方向推，避免核心被弹到平台另一侧（看起来像瞬移）
+  function resolveToPrev(prevX, prevY) {
+    const g = Game, c = g.core;
+    for (const p of g.level.platforms) {
+      const nx = clamp(c.x, p.x, p.x + p.w);
+      const ny = clamp(c.y, p.y, p.y + p.h);
+      const dx = c.x - nx, dy = c.y - ny;
+      const d = Math.hypot(dx, dy);
+      if (d >= c.r) continue;
+      if (d > 0.001) {
+        const ux = dx / d, uy = dy / d;
+        c.x = nx + ux * c.r;
+        c.y = ny + uy * c.r;
+        const vn = c.vx * ux + c.vy * uy;
+        if (vn < 0) { c.vx -= vn * ux; c.vy -= vn * uy; }
+      } else {
+        // 圆心在矩形内：朝上一帧所在的一侧退出
+        let ux = prevX - c.x, uy = prevY - c.y;
+        const l = Math.hypot(ux, uy);
+        if (l < 0.001) { ux = 0; uy = -1; } else { ux /= l; uy /= l; }
+        let guard = 0;
+        while (guard++ < 400 && c.x > p.x - c.r && c.x < p.x + p.w + c.r && c.y > p.y - c.r && c.y < p.y + p.h + c.r) {
+          c.x += ux * 2;
+          c.y += uy * 2;
+        }
+        c.vx = 0;
+        c.vy = 0;
+      }
+    }
+    c.x = clamp(c.x, c.r, WORLD_W - c.r);
+    c.y = clamp(c.y, c.r, worldH() - c.r);
+  }
+
+  function solveArms() {
+    const g = Game, c = g.core;
+    for (const h of g.hands) {
+      if (!h.fixed) continue;
+      const dx = c.x - h.anchorX;
+      const dy = c.y - h.anchorY;
+      const d = Math.hypot(dx, dy);
+      if (d > REACH) {
+        const k = REACH / d;
+        c.x = h.anchorX + dx * k;
+        c.y = h.anchorY + dy * k;
+        // 去掉沿臂向外的速度
+        const ux = dx / d, uy = dy / d;
+        const vn = c.vx * ux + c.vy * uy;
+        if (vn > 0) { c.vx -= vn * ux; c.vy -= vn * uy; }
+      }
+    }
+  }
+
+  function placeHands(sample) {
+    const g = Game, c = g.core;
+    for (let i = 0; i < 2; i++) {
+      const h = g.hands[i];
+      const s = sample.hands[i] || { dx: 0, dy: -150, closed: false };
+      if (h.fixed) {
+        h.x = h.anchorX;
+        h.y = h.anchorY;
+      } else {
+        let dx = s.dx, dy = s.dy;
+        const l = Math.hypot(dx, dy);
+        if (l > REACH) { dx = dx / l * REACH; dy = dy / l * REACH; }
+        h.x = c.x + dx;
+        h.y = c.y + dy;
+        // 手不出世界
+        h.x = clamp(h.x, 0, WORLD_W);
+        h.y = clamp(h.y, 0, worldH());
+      }
+      // 抓握时，手臂的"期望长度"= 玩家真实手到黄点的距离（收手 → 身体被拉起）
+      if (s.closed && !h.wasClosed) tryGrab(h);
+      if (!s.closed && h.fixed) releaseHand(h);
+      h.closed = !!s.closed;
+      h.wasClosed = !!s.closed;
+      h.missT = Math.max(0, h.missT - DT);
+      h.flashT = Math.max(0, h.flashT - DT);
+
+      // 抓取提示：手附近有可抓物
+      if (!h.fixed) {
+        h.nearT = findGrab(h.x, h.y) ? 1 : 0;
+      } else {
+        h.nearT = 0;
+      }
+    }
+  }
+
+  function checkCheckpoints() {
+    const g = Game, L = g.level;
+    for (let i = 0; i < L.checkpoints.length; i++) {
+      const cp = L.checkpoints[i];
+      if (cp.activated) continue;
+      if (dist(g.core.x, g.core.y, cp.trigger.x, cp.trigger.y) < cp.trigger.r + CORE_R) {
+        cp.activated = true;
+        g.cpIndex = Math.max(g.cpIndex, i);
+        Sfx.checkpoint();
+        addFx(cp.trigger.x, cp.trigger.y, "checkpoint");
+        if (cp.teleportTo != null && L.checkpoints[cp.teleportTo]) {
+          // 层末 → 传送到下一层层初，视野跟着上移
+          const t = L.checkpoints[cp.teleportTo];
+          t.activated = true;
+          g.cpIndex = cp.teleportTo;
+          g.core.x = t.spawn.x;
+          g.core.y = t.spawn.y;
+          g.core.vx = 0;
+          g.core.vy = 0;
+          for (const h of g.hands) { h.fixed = false; h.attached = null; }
+          addFx(t.spawn.x, t.spawn.y, "checkpoint");
+          toast("第 " + (cp.layer + 1) + " 层完成 · 传送到第 " + (t.layer + 1) + " 层");
+        } else {
+          toast(i === 0 ? "起点检查点已激活" : "检查点已激活 · 按 R 可回到这里");
+        }
+      }
+    }
+  }
+
+  function checkSummit() {
+    const g = Game, s = g.level.summit;
+    if (dist(g.core.x, g.core.y, s.x, s.y) < SUMMIT_R + CORE_R) {
+      completeLevel();
+    }
+  }
+
+  function applyBoostZones() {
+    const g = Game;
+    for (const b of g.level.boosts) {
+      const c = g.core;
+      if (c.x > b.x && c.x < b.x + b.w && c.y > b.y && c.y < b.y + b.h) {
+        const l = Math.hypot(b.dx, b.dy) || 1;
+        c.vx += (b.dx / l) * b.power * DT;
+        c.vy += (b.dy / l) * b.power * DT;
+        const sp = Math.hypot(c.vx, c.vy);
+        if (sp > b.maxSpeed) {
+          c.vx = c.vx / sp * b.maxSpeed;
+          c.vy = c.vy / sp * b.maxSpeed;
+        }
+      }
+    }
+  }
+
+  /* ============================================================
+   * 6. 特效
+   * ============================================================ */
+  function addFx(x, y, kind) {
+    Game.fx.push({ x, y, kind, t: 0, life: kind === "checkpoint" ? 0.9 : 0.5 });
+  }
+  function updateFx(dt) {
+    for (const f of Game.fx) f.t += dt;
+    Game.fx = Game.fx.filter((f) => f.t < f.life);
+  }
+
+  /* ============================================================
+   * 7. 主步进
+   * ============================================================ */
+  function respawn() {
+    const g = Game;
+    if (!g.level) return;
+    const cp = g.level.checkpoints[g.cpIndex];
+    if (!cp) return;
+    g.core.x = cp.spawn.x;
+    g.core.y = cp.spawn.y;
+    g.core.vx = 0; g.core.vy = 0;
+    for (const h of g.hands) { h.fixed = false; h.attached = null; }
+    g.respawns++;
+    g.fade = 0.55;
+    addFx(cp.spawn.x, cp.spawn.y, "respawn");
+    Sfx.respawn();
+  }
+
+  function stepPhysics(dt) {
+    const g = Game, c = g.core;
+
+    // 移动平台：先更新位置，站在上面的核心被一起带走
+    for (const m of g.level.movers) {
+      const mv = m.mover;
+      const off = Math.sin((g.time + mv.phase) * mv.speed) * mv.range;
+      const nx = mv.axis === "x" ? m.baseX + off : m.baseX;
+      const ny = mv.axis === "y" ? m.baseY + off : m.baseY;
+      const mdx = nx - m.x, mdy = ny - m.y;
+      m.x = nx;
+      m.y = ny;
+      const onTop = Math.abs((c.y + CORE_R) - m.y) < 8 && c.x > m.x - CORE_R && c.x < m.x + m.w + CORE_R;
+      if (onTop) {
+        c.x += mdx;
+        c.y += mdy;
+      }
+      // 抓着这块平台的手，抓点也要跟着平台移动
+      for (const h of g.hands) {
+        if (h.fixed && h.attached && h.attached.ref === m) {
+          h.anchorX += mdx;
+          h.anchorY += mdy;
+        }
+      }
+    }
+
+    const sample = Input.sample(dt);
+
+    // 1) 先按当前核心位置放出两只手，再判断抓握
+    for (let i = 0; i < 2; i++) {
+      const h = g.hands[i], s = sample.hands[i];
+      if (!h.fixed) {
+        let dx = s.dx, dy = s.dy;
+        const l = Math.hypot(dx, dy);
+        if (l > REACH) { dx = dx / l * REACH; dy = dy / l * REACH; }
+        h.x = c.x + dx;
+        h.y = c.y + dy;
+      }
+      if (!s.lost && s.closed && !h.wasClosed && !h.fixed) tryGrab(h);
+      if (!s.closed && h.fixed) releaseHand(h);
+      h.closed = !!s.closed;
+      h.wasClosed = !!s.closed;
+      h.missT = Math.max(0, h.missT - DT);
+      h.flashT = Math.max(0, h.flashT - DT);
+    }
+
+    // 2) 核心定位
+    //    抓握时：严格映射 core = anchor - (手相对黄点的偏移)，并把这一帧的位移记成速度
+    //    松手后：速度保留 + 重力下落（"有质量"的体现）
+    const fixed = fixedHands();
+    const oldX = c.x, oldY = c.y;
+    // 一帧内核心最多移动 MAX_STEP px：分小步走、每步都解一次碰撞，杜绝穿过平台
+    const MAX_STEP = 6;
+    if (fixed.length) {
+      let tx = 0, ty = 0;
+      for (let i = 0; i < 2; i++) {
+        const h = g.hands[i];
+        if (!h.fixed) continue;
+        tx += h.anchorX - sample.hands[i].dx;
+        ty += h.anchorY - sample.hands[i].dy;
+      }
+      tx /= fixed.length;
+      ty /= fixed.length;
+      let px = c.x, py = c.y;
+      const dx = tx - px, dy = ty - py;
+      const dist = Math.hypot(dx, dy);
+      const n = Math.max(1, Math.min(240, Math.ceil(dist / MAX_STEP)));
+      for (let k = 0; k < n; k++) {
+        c.x += dx / n;
+        c.y += dy / n;
+        resolveToPrev(px, py);
+        px = c.x;
+        py = c.y;
+      }
+      // 松手时把这一帧的速度带出去（拉得快就能"甩"出去一点）
+      c.vx = clamp((c.x - oldX) / dt, -MAX_SPEED, MAX_SPEED);
+      c.vy = clamp((c.y - oldY) / dt, -MAX_SPEED, MAX_SPEED);
+    } else {
+      c.vy += GRAVITY * dt;
+      c.vx *= Math.exp(-AIR_DRAG * dt);
+      c.vy *= Math.exp(-0.2 * dt);
+      let px = c.x, py = c.y;
+      const dx = c.vx * dt, dy = c.vy * dt;
+      const dist = Math.hypot(dx, dy);
+      const n = Math.max(1, Math.min(240, Math.ceil(dist / MAX_STEP)));
+      for (let k = 0; k < n; k++) {
+        c.x += dx / n;
+        c.y += dy / n;
+        resolveToPrev(px, py);
+        px = c.x;
+        py = c.y;
+      }
+      collideCore();
+      // 上升气流：自由状态从外面进入时被弹起
+      g.boostCd = Math.max(0, (g.boostCd || 0) - dt);
+      const inside = !!boostAt(c.x, c.y);
+      // 只要在气流里、而且不是正在被弹上去，就弹一次（落地后再进来会再次弹）
+      if (inside && c.vy > -250) {
+        launchBoost(boostAt(c.x, c.y));
+      }
+      g.inBoost = inside;
+      // 平台摩擦：落地后横向速度快速衰减
+      if (c.grounded) {
+        c.vx *= Math.exp(-FRICTION * dt);
+        if (Math.abs(c.vx) < 40) c.vx = 0;
+      }
+    }
+    c.grounded = false;
+
+    // 3) 碰撞与臂展（碰撞箱会把核心推开，这是"被碰撞箱影响"的唯一来源）
+    if (fixed.length) {
+      resolveToPrev(oldX, oldY);
+      solveArms();
+      resolveToPrev(oldX, oldY);
+    } else {
+      collideCore();
+      solveArms();
+      collideCore();
+    }
+
+    // 5) 核心定下来后，重新摆一次手（固定的手在抓点，自由手 = 核心 + 偏移）
+    for (let i = 0; i < 2; i++) {
+      const h = g.hands[i], s = sample.hands[i];
+      if (h.fixed) {
+        h.x = h.anchorX;
+        h.y = h.anchorY;
+        h.nearT = 0;
+        continue;
+      }
+      let dx = s.dx, dy = s.dy;
+      const l = Math.hypot(dx, dy);
+      if (l > REACH) { dx = dx / l * REACH; dy = dy / l * REACH; }
+      h.x = clamp(c.x + dx, 0, WORLD_W);
+      h.y = clamp(c.y + dy, 0, worldH());
+      h.nearT = findGrab(h.x, h.y) ? 1 : 0;
+    }
+
+    checkCheckpoints();
+    checkSummit();
+
+    g.cam = lerp(g.cam, c.y - VIEW_H * CAM_CENTER, 1 - Math.exp(-CAM_FOLLOW * dt));
+    g.camX = lerp(g.camX, c.x - VIEW_W / 2, 1 - Math.exp(-CAM_FOLLOW * dt));
+    g.time += dt;
+    g.hintT = Math.max(0, g.hintT - dt);
+    g.fade = Math.max(0, g.fade - dt);
+    g.shake = Math.max(0, g.shake - dt * 3);
+    updateFx(dt);
+  }
+
+  function beginLevel(level, isSegment) {
+    const g = Game;
+    g.isSegment = !!isSegment;
+    g.level = level;
+    g.worldH = level.worldH || WORLD_H;
+    g.core.x = g.level.start.x;
+    g.core.y = g.level.start.y;
+    g.core.vx = 0; g.core.vy = 0;
+    for (const h of g.hands) { h.fixed = false; h.attached = null; h.closed = false; h.wasClosed = false; }
+    g.time = 0;
+    g.respawns = 0;
+    g.cpIndex = -1;
+    g.hintT = 10;
+    g.cam = g.core.y - VIEW_H * CAM_CENTER;
+    g.camX = g.core.x - VIEW_W / 2;
+    g.fx = [];
+    g.input.buttons[0] = false;
+    g.input.buttons[1] = false;
+    g.demo.h1 = { x: -140, y: -70 };
+    g.demo.h2 = { x: 140, y: -70 };
+    g.demo.c1 = false;
+    g.demo.c2 = false;
+    g.demo.keys = {};
+    g.input.prevMouse.x = g.input.mouse.x;
+    g.input.prevMouse.y = g.input.mouse.y;
+    g.state = "play";
+    const cp = g.level.checkpoints[0];
+    if (cp) { cp.activated = true; g.cpIndex = 0; }
+    g.camera.ready = false;
+  }
+
+  function startLevel(index) {
+    Game.levelIndex = index;
+    beginLevel(makeLevel(index), false);
+  }
+
+  function startSegment(index) {
+    Game.segmentIndex = index;
+    beginLevel(makeSegment(index), true);
+  }
+
+  function completeLevel() {
+    const g = Game;
+    if (g.state !== "play") return;
+    g.state = "result";
+    Sfx.clear();
+    const t = g.time;
+    const key = "whatsup.best." + g.levelIndex;
+    let best = null;
+    try {
+      const raw = window.localStorage && window.localStorage.getItem(key);
+      best = raw ? parseFloat(raw) : null;
+      if (best === null || t < best) {
+        best = t;
+        window.localStorage && window.localStorage.setItem(key, String(t));
+      }
+    } catch (e) { best = t; }
+    g.stats.best = best;
+    if (typeof document !== "undefined") {
+      UI.showResult(t, g.respawns, best);
+    }
+  }
+
+  /* ============================================================
+   * 8. 渲染
+   * ============================================================ */
+  const canvas = typeof document !== "undefined" ? document.getElementById("game") : null;
+  const ctx = canvas ? canvas.getContext("2d") : null;
+  let view = { scale: 1, ox: 0, oy: 0, dpr: 1 };
+
+  function resize() {
+    if (!canvas) return;
+    const w = window.innerWidth, h = window.innerHeight;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    const s = Math.min(w / VIEW_W, h / VIEW_H);
+    view = { scale: s, ox: (w - VIEW_W * s) / 2, oy: (h - VIEW_H * s) / 2, dpr };
+  }
+
+  const stars = [];
+  (function initStars() {
+    let seed = 1337;
+    const rnd = () => {
+      seed = (seed * 1664525 + 1013904223) % 4294967296;
+      return seed / 4294967296;
+    };
+    for (let i = 0; i < 140; i++) {
+      stars.push({ x: rnd() * VIEW_W, y: rnd() * VIEW_H, r: rnd() * 1.6 + 0.4, a: rnd() * 0.5 + 0.2, p: rnd() * 0.6 + 0.25 });
+    }
+  })();
+
+  function roundRect(x, y, w, h, r) {
+    const rr = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
+  }
+
+  function drawBackground() {
+    const g = Game;
+    const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+    sky.addColorStop(0, "#0d0818");
+    sky.addColorStop(0.45, "#1b1030");
+    sky.addColorStop(1, "#2a1738");
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+    // 星点（视差）
+    for (const s of stars) {
+      const y = (s.y - g.cam * s.p * 0.08 % VIEW_H + VIEW_H) % VIEW_H;
+      ctx.globalAlpha = s.a * (0.7 + 0.3 * Math.sin(performance.now() / 1600 + s.x));
+      ctx.fillStyle = "#fff3d6";
+      ctx.beginPath();
+      ctx.arc(s.x, y, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // 远景山影
+    ctx.fillStyle = "rgba(52,30,74,.55)";
+    ctx.beginPath();
+    ctx.moveTo(0, VIEW_H);
+    for (let x = 0; x <= VIEW_W; x += 40) {
+      const y = VIEW_H * 0.62 + Math.sin(x / 190 + 1.2) * 60 + Math.sin(x / 70) * 18;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(VIEW_W, VIEW_H);
+    ctx.closePath();
+    ctx.fill();
+
+    // 云雾
+    const fog = ctx.createLinearGradient(0, VIEW_H * 0.55, 0, VIEW_H);
+    fog.addColorStop(0, "rgba(120,90,160,0)");
+    fog.addColorStop(1, "rgba(120,90,160,.16)");
+    ctx.fillStyle = fog;
+    ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  }
+
+  function drawPlatform(p) {
+    const grd = ctx.createLinearGradient(0, p.y, 0, p.y + p.h);
+    grd.addColorStop(0, "#4a3563");
+    grd.addColorStop(1, "#2e1f42");
+    ctx.fillStyle = grd;
+    roundRect(p.x, p.y, p.w, p.h, 9);
+    ctx.fill();
+
+    ctx.strokeStyle = "rgba(233,185,110,.55)";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(p.x + 6, p.y + 1.5);
+    ctx.lineTo(p.x + p.w - 6, p.y + 1.5);
+    ctx.stroke();
+
+    // 石缝
+    ctx.strokeStyle = "rgba(255,255,255,.06)";
+    ctx.lineWidth = 2;
+    for (let x = p.x + 18; x < p.x + p.w - 8; x += 34) {
+      ctx.beginPath();
+      ctx.moveTo(x, p.y + 6);
+      ctx.lineTo(x + 10, p.y + p.h - 6);
+      ctx.stroke();
+    }
+  }
+
+  function drawRock(r) {
+    const g = ctx.createRadialGradient(r.x - r.r * 0.35, r.y - r.r * 0.45, r.r * 0.2, r.x, r.y, r.r * 1.25);
+    g.addColorStop(0, "#6f5a8c");
+    g.addColorStop(0.55, "#4a3a60");
+    g.addColorStop(1, "#2c2038");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    const pts = 9;
+    for (let i = 0; i <= pts; i++) {
+      const a = (i / pts) * Math.PI * 2;
+      const rr = r.r * (0.86 + 0.16 * Math.sin(i * 2.3 + r.x));
+      const x = r.x + Math.cos(a) * rr;
+      const y = r.y + Math.sin(a) * rr;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = "rgba(233,185,110,.22)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  function drawCheckpoint(cp, idx) {
+    const active = cp.activated;
+    const t = performance.now() / 1000;
+    ctx.save();
+    ctx.translate(cp.trigger.x, cp.trigger.y);
+    const pulse = 1 + Math.sin(t * 2.4 + idx) * 0.04;
+    ctx.scale(pulse, pulse);
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = active ? "rgba(255,216,155,.95)" : "rgba(120,200,220,.55)";
+    ctx.shadowColor = active ? "rgba(255,200,120,.9)" : "rgba(80,180,210,.5)";
+    ctx.shadowBlur = active ? 26 : 12;
+    ctx.beginPath();
+    ctx.arc(0, 0, CHECK_R * 0.78, Math.PI, Math.PI * 2);
+    ctx.stroke();
+    // 旗杆
+    ctx.beginPath();
+    ctx.moveTo(-CHECK_R * 0.78, 0);
+    ctx.lineTo(-CHECK_R * 0.78, 46);
+    ctx.strokeStyle = active ? "rgba(255,216,155,.8)" : "rgba(120,200,220,.45)";
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawSummit(s) {
+    const t = performance.now() / 1000;
+    ctx.save();
+    ctx.translate(s.x, s.y);
+    const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, 90);
+    glow.addColorStop(0, "rgba(255,220,150,.55)");
+    glow.addColorStop(1, "rgba(255,220,150,0)");
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(0, 0, 90 + Math.sin(t * 2) * 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#ffd89b";
+    ctx.shadowColor = "rgba(255,200,110,.95)";
+    ctx.shadowBlur = 30;
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2 + t * 0.2;
+      const r = i % 2 === 0 ? 26 : 12;
+      const x = Math.cos(a) * r, y = Math.sin(a) * r;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 手部：可见的手形 + 外圈判定区域（黄=未抓，绿=已抓住，红闪=抓空）
+  function drawHand(h, i) {
+    const g = Game;
+    const fixed = h.fixed;
+    const miss = h.missT > 0;
+    const ringR = HAND_R;
+    const ringCol = miss ? "rgba(255,110,110,.9)" : fixed ? "#65e6a1" : "#f2c94c";
+
+    // 判定区域：半透明填充 + 外圈 + 内圈虚线，保证在复杂背景上也看得清
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(h.x, h.y, ringR, 0, Math.PI * 2);
+    ctx.fillStyle = fixed ? "rgba(101,230,161,.20)" : "rgba(242,201,76,.13)";
+    ctx.fill();
+    ctx.strokeStyle = ringCol;
+    ctx.lineWidth = fixed ? 6 : 4;
+    ctx.shadowColor = miss ? "rgba(255,110,110,.8)" : fixed ? "rgba(101,230,161,.9)" : "rgba(242,201,76,.6)";
+    ctx.shadowBlur = fixed ? 22 : 14;
+    ctx.stroke();
+    ctx.globalAlpha = 0.45;
+    ctx.setLineDash([6, 7]);
+    ctx.beginPath();
+    ctx.arc(h.x, h.y, Math.max(6, ringR - 8), 0, Math.PI * 2);
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    // 判定范围内有可抓物：在实体表面画一个绿色菱形，明确"这里能抓"
+    if (!fixed && h.nearT) {
+      const hit = findGrab(h.x, h.y);
+      if (hit) {
+        ctx.strokeStyle = "rgba(101,230,161,.95)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(hit.point.x, hit.point.y - 8);
+        ctx.lineTo(hit.point.x + 8, hit.point.y);
+        ctx.lineTo(hit.point.x, hit.point.y + 8);
+        ctx.lineTo(hit.point.x - 8, hit.point.y);
+        ctx.closePath();
+        ctx.stroke();
+      }
+    }
+
+    // 手形：手指朝外（远离核心）
+    const ang = Math.atan2(h.y - g.core.y, h.x - g.core.x);
+    ctx.save();
+    ctx.translate(h.x, h.y);
+    ctx.rotate(ang + Math.PI / 2);
+    ctx.fillStyle = "rgba(248,243,255,.95)";
+    ctx.strokeStyle = "rgba(248,243,255,.95)";
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.ellipse(0, 2, 11, 13, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.lineWidth = 5;
+    for (let k = 0; k < 4; k++) {
+      const x = -7.5 + k * 5;
+      ctx.beginPath();
+      ctx.moveTo(x, -8);
+      ctx.lineTo(x, -19 - (k === 1 || k === 2 ? 3 : 0));
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.moveTo(-10, 3);
+    ctx.lineTo(-18, -3);
+    ctx.stroke();
+    ctx.restore();
+
+    if (miss) {
+      ctx.strokeStyle = "rgba(255,120,120," + clamp(h.missT / 0.22, 0, 1) + ")";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(h.x, h.y, ringR + 6 + (1 - h.missT / 0.22) * 14, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  function drawAvatar() {
+    const g = Game, c = g.core;
+    // 手臂
+    for (const h of g.hands) {
+      ctx.beginPath();
+      ctx.moveTo(c.x, c.y);
+      ctx.lineTo(h.x, h.y);
+      ctx.strokeStyle = "rgba(210,190,240,.6)";
+      ctx.lineWidth = 7;
+      ctx.lineCap = "round";
+      ctx.stroke();
+      ctx.strokeStyle = "rgba(30,18,44,.5)";
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    }
+
+    // 手（含黄色判定圈）：之前只定义了 drawHand 却没有调用，手和判定圈都不会显示
+    for (let i = 0; i < g.hands.length; i++) drawHand(g.hands[i], i);
+
+    // 核心光晕
+    const glow = ctx.createRadialGradient(c.x, c.y, 2, c.x, c.y, 60);
+    glow.addColorStop(0, "rgba(200,170,255,.5)");
+    glow.addColorStop(1, "rgba(200,170,255,0)");
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, 60, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 核心本体
+    const grd = ctx.createRadialGradient(c.x - 5, c.y - 6, 2, c.x, c.y, c.r + 4);
+    grd.addColorStop(0, "#fff6e8");
+    grd.addColorStop(0.5, "#e6d6ff");
+    grd.addColorStop(1, "#a487d0");
+    ctx.fillStyle = grd;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,.65)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // 眼睛（朝向头部目标）
+    const mhx = (g.hands[0].x + g.hands[1].x) / 2, mhy = (g.hands[0].y + g.hands[1].y) / 2;
+    const dx = mhx - c.x, dy = mhy - c.y;
+    const l = Math.hypot(dx, dy) || 1;
+    ctx.fillStyle = "#3b2a52";
+    ctx.beginPath();
+    ctx.arc(c.x + dx / l * 4, c.y + dy / l * 4, 3.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawRope(rope) {
+    if (!rope.nodes.length) return;
+    ctx.strokeStyle = "rgba(214,160,110,.85)";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(rope.nodes[0].x, rope.nodes[0].y);
+    for (const n of rope.nodes) ctx.lineTo(n.x, n.y);
+    ctx.stroke();
+    for (const n of rope.nodes) {
+      ctx.fillStyle = "#c98d5a";
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, n.r * 0.55, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255,220,170,.7)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+
+  function drawBoost(b) {
+    const t = performance.now() / 1000;
+    ctx.save();
+    ctx.globalAlpha = 0.16;
+    ctx.fillStyle = "#ffcf6b";
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.globalAlpha = 0.9;
+    ctx.strokeStyle = "rgba(255,216,155,.7)";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    // 上升箭头
+    ctx.strokeStyle = "rgba(255,230,170,.85)";
+    ctx.lineWidth = 3;
+    for (let k = 0; k < 3; k++) {
+      const y = b.y + b.h - 20 - ((t * 90 + k * 90) % b.h);
+      const cx = b.x + b.w / 2;
+      ctx.beginPath();
+      ctx.moveTo(cx - 14, y + 12);
+      ctx.lineTo(cx, y);
+      ctx.lineTo(cx + 14, y + 12);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawWorld() {
+    const g = Game;
+    ctx.save();
+    ctx.translate(-g.camX, -g.cam);
+
+    // 岩壁纹理（两侧）
+    ctx.fillStyle = "rgba(38,24,56,.6)";
+    ctx.fillRect(-40, g.cam, 40, VIEW_H);
+    ctx.fillRect(WORLD_W, g.cam, 40, VIEW_H);
+
+    for (const p of g.level.platforms) drawPlatform(p);
+    for (const rope of g.level.ropes) drawRope(rope);
+    for (const b of g.level.boosts) drawBoost(b);
+    for (const r of g.level.rocks) drawRock(r);
+    for (let i = 0; i < g.level.checkpoints.length; i++) drawCheckpoint(g.level.checkpoints[i], i);
+    drawSummit(g.level.summit);
+    drawAvatar();
+
+    // 特效
+    for (const f of g.fx) {
+      const k = f.t / f.life;
+      ctx.globalAlpha = 1 - k;
+      ctx.strokeStyle = f.kind === "checkpoint" ? "#ffd89b" : "#9f8bd0";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(f.x, f.y, 12 + k * 70, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.restore();
+  }
+
+  function fmtTime(t) {
+    const m = Math.floor(t / 60);
+    const s = Math.floor(t % 60);
+    return m + ":" + String(s).padStart(2, "0");
+  }
+
+  function drawHUD() {
+    const g = Game, L = g.level;
+    if (!L) return;
+
+    // 身体参照黄点（只画实心点，不画外圈）
+    const dotX = VIEW_W / 2, dotY = VIEW_H * CAM_CENTER;
+    ctx.fillStyle = "#f2c94c";
+    ctx.shadowColor = "rgba(242,201,76,.95)";
+    ctx.shadowBlur = 18;
+    ctx.beginPath();
+    ctx.arc(dotX, dotY, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = "rgba(242,201,76,.75)";
+    ctx.font = '600 12px "Segoe UI","Microsoft YaHei",sans-serif';
+    ctx.textAlign = "center";
+    ctx.fillText("身体", dotX, dotY + 26);
+    ctx.textAlign = "left";
+
+    // 顶部条
+    const grad = ctx.createLinearGradient(0, 0, 0, 130);
+    grad.addColorStop(0, "rgba(10,6,18,.88)");
+    grad.addColorStop(1, "rgba(10,6,18,0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, VIEW_W, 130);
+
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#f6efff";
+    ctx.font = '600 28px "Segoe UI","Microsoft YaHei",sans-serif';
+    ctx.fillText(L.isSegment ? "路段 · " + L.name : (L.generated ? "关卡 · " + L.name : "第 " + (L.index + 1) + " 关 · " + L.name), 44, 44);
+
+    ctx.fillStyle = "rgba(233,185,110,.9)";
+    ctx.font = '600 15px "Segoe UI","Microsoft YaHei",sans-serif';
+    const pct = clamp((L.start.y - g.core.y) / Math.max(1, L.start.y - L.summit.y), 0, 1);
+    ctx.fillText("高度 " + Math.round(pct * 100) + "%", 44, 74);
+
+    // 进度条
+    const bx = 560, by = 40, bw = 640, bh = 16;
+    ctx.fillStyle = "rgba(255,255,255,.1)";
+    roundRect(bx, by, bw, bh, 8);
+    ctx.fill();
+    const fill = ctx.createLinearGradient(bx, 0, bx + bw, 0);
+    fill.addColorStop(0, "#8e6bc9");
+    fill.addColorStop(1, "#ffd89b");
+    ctx.fillStyle = fill;
+    roundRect(bx, by, Math.max(6, bw * pct), bh, 8);
+    ctx.fill();
+
+    // 检查点刻度
+    for (const cp of L.checkpoints) {
+      const k = clamp((L.start.y - cp.spawn.y) / Math.max(1, L.start.y - L.summit.y), 0, 1);
+      ctx.fillStyle = cp.activated ? "#ffd89b" : "rgba(255,255,255,.35)";
+      ctx.beginPath();
+      ctx.arc(bx + bw * k, by + bh / 2, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // 右侧状态
+    ctx.fillStyle = "#f6efff";
+    ctx.font = '600 24px "Segoe UI","Microsoft YaHei",sans-serif';
+    ctx.textAlign = "right";
+    ctx.fillText(fmtTime(g.time), 1556, 40);
+    ctx.font = '600 16px "Segoe UI","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = "rgba(233,185,110,.9)";
+    const hit = L.checkpoints.filter((c) => c.activated).length;
+    ctx.fillText("检查点 " + hit + "/" + L.checkpoints.length, 1556, 72);
+    ctx.textAlign = "left";
+
+    // 版本
+    ctx.font = '500 12px "Segoe UI",sans-serif';
+    ctx.fillStyle = "rgba(255,255,255,.28)";
+    ctx.textAlign = "right";
+    ctx.fillText("What's Up? " + VERSION, 1556, VIEW_H - 18);
+    ctx.textAlign = "left";
+
+    // 底部提示
+    if (g.hintT > 0) {
+      const a = clamp(g.hintT / 2, 0, 1);
+      ctx.globalAlpha = a;
+      ctx.textAlign = "center";
+      ctx.font = '500 17px "Segoe UI","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = "rgba(240,230,255,.85)";
+      ctx.fillText(L.hint, VIEW_W / 2, VIEW_H - 64);
+      ctx.textAlign = "left";
+      ctx.globalAlpha = 1;
+    }
+
+    // 摄像头状态灯
+    if (g.mode === "camera") {
+      const ok = g.camera.ready;
+      ctx.fillStyle = ok ? "rgba(120,230,160,.9)" : "rgba(255,180,120,.95)";
+      ctx.beginPath();
+      ctx.arc(296, VIEW_H - 44, 7, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,.5)";
+      ctx.font = '500 12px "Segoe UI",sans-serif';
+      ctx.fillText(ok ? "识别中" : "等待摄像头", 312, VIEW_H - 40);
+    }
+
+
+    // 淡出遮罩
+    if (g.fade > 0) {
+      ctx.fillStyle = "rgba(10,6,18," + clamp(g.fade / 0.55, 0, 1) * 0.8 + ")";
+      ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+    }
+  }
+
+  function render() {
+    if (!ctx) return;
+    const g = Game;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const s = view.dpr * view.scale;
+    ctx.setTransform(s, 0, 0, s, view.dpr * view.ox, view.dpr * view.oy);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, VIEW_W, VIEW_H);
+    ctx.clip();
+
+    drawBackground();
+    if (g.level) {
+      drawWorld();
+      drawHUD();
+    } else {
+      // 标题界面：背景已由 drawBackground 画好，文字由 DOM 覆盖层负责
+    }
+    ctx.restore();
+  }
+
+  /* ============================================================
+   * 9. 摄像头（MediaPipe）
+   * ============================================================ */
+  const HAND_MODEL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+  const MP_BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+  const HAND_CONNECTIONS = [
+    [0, 1], [1, 2], [2, 3], [3, 4],
+    [0, 5], [5, 6], [6, 7], [7, 8],
+    [5, 9], [9, 10], [10, 11], [11, 12],
+    [9, 13], [13, 14], [14, 15], [15, 16],
+    [13, 17], [17, 18], [18, 19], [19, 20], [0, 17]
+  ];
+
+  const Cam = {
+    video: null,
+    stream: null,
+    hand: null,
+    pose: null,
+    active: false,
+    running: false,
+    lastDetect: 0,
+    prevSlot: [null, null],
+    lastLandmarks: [],
+    lost: [0, 0],
+    lastLoss: [0, 0],
+    closedState: [false, false],
+    status: "",
+    async start(onStatus) {
+      this.status = onStatus;
+      onStatus("请求摄像头权限…");
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("这个浏览器不支持摄像头访问（或页面不是安全上下文）。");
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
+        audio: false
+      });
+      this.stream = stream;
+      const v = document.createElement("video");
+      v.playsInline = true;
+      v.muted = true;
+      v.autoplay = true;
+      v.srcObject = stream;
+      await v.play();
+      this.video = v;
+
+      onStatus("加载手部识别模型…");
+      const mod = await import(MP_BASE);
+      const fileset = await mod.FilesetResolver.forVisionTasks(MP_BASE + "/wasm");
+      const makeHand = (delegate) => mod.HandLandmarker.createFromOptions(fileset, {
+        baseOptions: { modelAssetPath: HAND_MODEL, delegate },
+        numHands: 2,
+        runningMode: "VIDEO"
+      });
+      try {
+        this.hand = await makeHand("GPU");
+      } catch (e) {
+        this.hand = await makeHand("CPU");
+      }
+      this.active = true;
+      this.running = true;
+      Game.camera.active = true;
+      this.loop();
+    },
+    stop() {
+      this.active = false;
+      this.running = false;
+      if (this.stream) this.stream.getTracks().forEach((t) => t.stop());
+      this.stream = null;
+      Game.camera.active = false;
+      Game.camera.ready = false;
+    },
+    loop() {
+      if (!this.running) return;
+      requestAnimationFrame(() => this.loop());
+      const v = this.video;
+      if (!v || v.readyState < 2) return;
+      const now = performance.now();
+      if (now - this.lastDetect < 33) return;
+      this.lastDetect = now;
+
+      let handRes = null;
+      try { handRes = this.hand.detectForVideo(v, now); } catch (e) { /* 丢帧忽略 */ }
+
+      const hands = [];
+      if (handRes && handRes.landmarks) {
+        for (let i = 0; i < handRes.landmarks.length; i++) {
+          const lm = handRes.landmarks[i];
+          const palm = Math.hypot(lm[0].x - lm[9].x, lm[0].y - lm[9].y) || 1e-4;
+          let sum = 0;
+          for (const tip of [8, 12, 16, 20]) sum += Math.hypot(lm[tip].x - lm[0].x, lm[tip].y - lm[0].y);
+          const ratio = (sum / 4) / palm;
+          hands.push({ x: 1 - lm[0].x, y: lm[0].y, ratio, landmarks: lm });
+        }
+      }
+      // 按 x 排序，并尽量沿用上一帧的左右手分配，避免左右互跳
+      hands.sort((a, b) => a.x - b.x);
+      const slots = [null, null];
+      for (const h of hands.slice(0, 2)) {
+        let best = -1, bd = 1e9;
+        for (let i = 0; i < 2; i++) {
+          if (slots[i]) continue;
+          const c = this.prevSlot[i];
+          const d = c ? Math.hypot(h.x - c.x, h.y - c.y) : (i === 0 ? h.x : 1 - h.x);
+          if (d < bd) { bd = d; best = i; }
+        }
+        if (best >= 0) slots[best] = h;
+      }
+
+      const cam = Game.camera;
+      for (let i = 0; i < 2; i++) {
+        const s = slots[i];
+        if (s) {
+          this.lost[i] = 0;
+          // 握拳滞回：合需要更低的比例，张开需要更高的比例
+          const closed = this.closedState[i] ? s.ratio < 1.78 : s.ratio < 1.45;
+          this.closedState[i] = closed;
+          cam.hands[i] = { x: s.x, y: s.y, closed };
+        } else {
+          this.lost[i] = (this.lost[i] || 0) + 0.033;
+          // 摄像头没绑定到这只手时，对应手部保持"抓紧"，避免识别丢失导致脱手
+          this.closedState[i] = true;
+          if (cam.hands[i]) cam.hands[i] = { x: cam.hands[i].x, y: cam.hands[i].y, closed: true };
+        }
+      }
+      if (slots[0] || slots[1]) {
+        this.prevSlot = slots.map((s) => (s ? { x: s.x, y: s.y } : null));
+      }
+
+      cam.ready = true;
+      this.lastLandmarks = (handRes && handRes.landmarks) ? handRes.landmarks : [];
+      this.drawPreview();
+    },
+    drawPreview() {
+      const cv = document.getElementById("cam");
+      if (!cv || cv.classList.contains("hidden")) return;
+      const c2 = cv.getContext("2d");
+      const w = cv.width, h = cv.height;
+      c2.clearRect(0, 0, w, h);
+      c2.save();
+      // 镜像显示，像照镜子一样
+      c2.translate(w, 0);
+      c2.scale(-1, 1);
+      if (this.video) {
+        c2.globalAlpha = 0.55;
+        c2.drawImage(this.video, 0, 0, w, h);
+        c2.globalAlpha = 1;
+      }
+      for (const set of this.lastLandmarks || []) {
+        c2.strokeStyle = "rgba(255,216,155,.85)";
+        c2.lineWidth = 1.5;
+        for (const [a, b] of HAND_CONNECTIONS) {
+          if (!set[a] || !set[b]) continue;
+          c2.beginPath();
+          c2.moveTo(set[a].x * w, set[a].y * h);
+          c2.lineTo(set[b].x * w, set[b].y * h);
+          c2.stroke();
+        }
+        c2.fillStyle = "rgba(127,227,239,.95)";
+        for (const p of set) {
+          c2.beginPath();
+          c2.arc(p.x * w, p.y * h, 2, 0, Math.PI * 2);
+          c2.fill();
+        }
+      }
+      c2.restore();
+
+      // ===== 摄像画面正中的黄点：手相对它的位置 = 手相对核心的位置 =====
+      const cx = w / 2, cy = h / 2;
+      const cam = Game.camera;
+      // 黄点 → 每只手的连线：直观看到"手相对身体"的方向与距离
+      for (let i = 0; i < 2; i++) {
+        const hnd = cam.hands[i];
+        if (!hnd) continue;
+        c2.strokeStyle = hnd.closed ? "rgba(101,230,161,.9)" : "rgba(242,201,76,.5)";
+        c2.lineWidth = 1.5;
+        c2.beginPath();
+        c2.moveTo(cx, cy);
+        c2.lineTo(hnd.x * w, hnd.y * h);
+        c2.stroke();
+      }
+      // 外圈虚线（视觉参照）
+      c2.strokeStyle = "rgba(242,201,76,.45)";
+      c2.setLineDash([5, 6]);
+      c2.lineWidth = 1.5;
+      c2.beginPath();
+      c2.arc(cx, cy, 30, 0, Math.PI * 2);
+      c2.stroke();
+      c2.setLineDash([]);
+      // 黄点本体
+      c2.fillStyle = "#f2c94c";
+      c2.shadowColor = "rgba(242,201,76,.95)";
+      c2.shadowBlur = 12;
+      c2.beginPath();
+      c2.arc(cx, cy, 5.5, 0, Math.PI * 2);
+      c2.fill();
+      c2.shadowBlur = 0;
+      c2.font = "600 11px 'Segoe UI','Microsoft YaHei',sans-serif";
+      c2.fillStyle = "rgba(242,201,76,.95)";
+      c2.textAlign = "center";
+      c2.fillText("身体", cx, cy + 44);
+      c2.textAlign = "left";
+
+      // 状态文字（不镜像）
+      c2.font = "600 12px 'Segoe UI','Microsoft YaHei',sans-serif";
+      c2.fillStyle = "rgba(255,255,255,.6)";
+      c2.fillText(this.lastLandmarks && this.lastLandmarks.length ? "手 " + this.lastLandmarks.length : "手 -", 8, 16);
+    }
+  };
+
+  /* ============================================================
+   * 10. 界面控制
+   * ============================================================ */
+  const UI = {
+    screens: {},
+    init() {
+      const ids = ["s-boot", "s-segments", "s-loading", "s-error", "s-pause", "s-result"];
+      for (const id of ids) this.screens[id] = document.getElementById(id);
+      this.toastEl = document.getElementById("toast");
+    },
+    show(id) {
+      for (const k in this.screens) {
+        if (!this.screens[k]) continue;
+        this.screens[k].classList.toggle("hidden", k !== id);
+      }
+    },
+    hideAll() {
+      for (const k in this.screens) if (this.screens[k]) this.screens[k].classList.add("hidden");
+    },
+    toast(msg) {
+      if (!this.toastEl) return;
+      this.toastEl.textContent = msg;
+      this.toastEl.classList.add("show");
+      clearTimeout(this._tt);
+      this._tt = setTimeout(() => this.toastEl.classList.remove("show"), 2400);
+    },
+    showResult(time, respawns, best) {
+      const el = (id) => document.getElementById(id);
+      const isSeg = !!Game.isSegment;
+      if (el("result-sub")) {
+        el("result-sub").textContent = isSeg
+          ? "路段 " + (Game.segmentIndex + 1) + " · " + Game.level.name
+          : (Game.level && Game.level.generated ? "关卡 · " + Game.level.name : "第 " + (Game.levelIndex + 1) + " 关 · " + Game.level.name);
+      }
+      if (el("res-time")) el("res-time").textContent = fmtTime(time);
+      if (el("res-respawn")) el("res-respawn").textContent = String(respawns);
+      if (el("res-best")) el("res-best").textContent = best == null ? "—" : fmtTime(best);
+      const total = isSeg ? SEGMENT_DEFS.length : totalLevels();
+      const idx = isSeg ? (Game.segmentIndex || 0) : Game.levelIndex;
+      const isLast = idx >= total - 1;
+      if (el("btn-next")) el("btn-next").style.display = isLast ? "none" : "";
+      if (el("result-hint")) {
+        el("result-hint").textContent = isLast ? "已经是最后一段了，按空格重玩" : "按空格 / N 下一段";
+      }
+      this.show("s-result");
+    }
+  };
+
+  function toast(msg) { if (typeof document !== "undefined") UI.toast(msg); }
+
+  /* ============================================================
+   * 11. 主循环与事件
+   * ============================================================ */
+  let lastFrame = 0;
+  let acc = 0;
+
+  function frame(ts) {
+    requestAnimationFrame(frame);
+    if (!lastFrame) lastFrame = ts;
+    let dt = (ts - lastFrame) / 1000;
+    lastFrame = ts;
+    if (dt > 0.25) dt = 0.25;
+    if (Game.state === "play") {
+      acc += dt;
+      let guard = 0;
+      while (acc >= DT && guard++ < 20) {
+        stepPhysics(DT);
+        acc -= DT;
+      }
+    } else {
+      acc = 0;
+    }
+    render();
+  }
+
+  function nextLevelOrSegment() {
+    if (Game.isSegment) {
+      const i = (Game.segmentIndex || 0) + 1;
+      if (i < SEGMENT_DEFS.length) startSegment(i);
+      else showSegments();
+    } else {
+      const i = Game.levelIndex + 1;
+      if (i < totalLevels()) startLevel(i);
+      else toast("已经通关全部关卡");
+    }
+  }
+
+  function showSegments() {
+    UI.hideAll();
+    Game.state = "boot";
+    Game.level = null;
+    const grid = document.getElementById("seg-grid");
+    if (grid) {
+      grid.innerHTML = SEGMENT_DEFS.map((d, i) => {
+        const stars = "★".repeat(d.stars) + "☆".repeat(5 - d.stars);
+        const badge = i < 10 ? "<span class='badge ok'>✓ 已合格</span>" : "<span class='badge new'>待检查</span>";
+        return "<button class='chip' data-seg='" + i + "'><span>" + (i + 1) + ". " + d.name + "</span><span class='stars'>" + stars + "</span>" + badge + "</button>";
+      }).join("");
+      grid.querySelectorAll("[data-seg]").forEach((el) => {
+        el.addEventListener("click", () => {
+          const si = Number(el.getAttribute("data-seg"));
+          enterWithMode(() => startSegment(si));
+        });
+      });
+    }
+    UI.show("s-segments");
+  }
+
+  function updateModeButtons() {
+    if (typeof document === "undefined") return;
+    const cam = document.getElementById("btn-cam");
+    const demo = document.getElementById("btn-demo");
+    if (!cam || !demo) return;
+    const onCam = Game.mode === "camera";
+    const onDemo = Game.mode === "demo";
+    if (cam.classList) {
+      cam.classList.toggle("mode-on", onCam);
+      cam.classList.toggle("mode-off", onDemo);
+    }
+    if (demo.classList) {
+      demo.classList.toggle("mode-on", onDemo);
+      demo.classList.toggle("mode-off", onCam);
+    }
+  }
+
+  function switchMode(mode) {
+    Game.mode = mode;
+    updateModeButtons();
+  }
+
+  function beginDemo(startFn) {
+    switchMode("demo");
+    if (!startFn) {
+      // 只切换模式，不直接开局：保留标题页的选关/选路段
+      UI.show("s-boot");
+      if (typeof document !== "undefined") {
+        const camEl = document.getElementById("cam");
+        if (camEl) camEl.classList.add("hidden");
+      }
+      toast("演示模式已启用 · 请选择教学关 / 路段 / 正式关卡");
+      return;
+    }
+    if (Game.demo) {
+      Game.demo.h1 = { x: -140, y: -70 };
+      Game.demo.h2 = { x: 140, y: -70 };
+      Game.demo.c1 = false;
+      Game.demo.c2 = false;
+      Game.demo.keys = {};
+    }
+    UI.hideAll();
+    if (typeof document !== "undefined") {
+      const camEl = document.getElementById("cam");
+      if (camEl) camEl.classList.add("hidden");
+    }
+    (startFn || (() => startLevel(0)))();
+    toast("演示模式：A/D 转动手1 · W/S 伸缩 · J/L 转动手2 · I/K 伸缩 · X/M 抓握");
+  }
+
+  // 进入教学关 / 路段：默认走摄像头；用户明确选过演示模式才用演示
+    function enterWithMode(startFn) {
+    if (Game.mode === "demo") {
+      UI.hideAll();
+      startFn();
+      return;
+    }
+    if (Cam.active) {
+      UI.hideAll();
+      startFn();
+      return;
+    }
+    pendingStart = startFn;
+    beginCamera(startFn);
+  }
+
+  let pendingStart = null;
+
+  async function beginCamera(startFn) {
+    switchMode("camera");
+    UI.show("s-loading");
+    document.getElementById("loading-msg").textContent = "请求摄像头权限…";
+    try {
+      await Cam.start((msg) => {
+        const el = document.getElementById("loading-msg");
+        if (el) el.textContent = msg;
+      });
+      const camEl = document.getElementById("cam");
+      if (camEl) camEl.classList.remove("hidden");
+      UI.hideAll();
+      (startFn || (() => startLevel(0)))();
+      toast("握拳抓住岩点 · 张开松手");
+    } catch (err) {
+      console.error(err);
+      const msg = document.getElementById("error-msg");
+      if (msg) {
+        msg.textContent = (err && err.message ? err.message : String(err)) +
+          " 如果是双击打开（file://），Chrome 通常不允许摄像头，可换 Firefox，或用本地服务器打开。";
+      }
+      UI.show("s-error");
+    }
+  }
+
+  function boot() {
+    UI.init();
+    window.addEventListener("resize", resize);
+    resize();
+
+    if (document.querySelectorAll) {
+      document.querySelectorAll("[data-level]").forEach((el) => {
+        el.addEventListener("click", () => {
+          const idx = Number(el.getAttribute("data-level"));
+          enterWithMode(() => {
+            startLevel(idx);
+            toast("第 " + (idx + 1) + " 关 · " + LEVEL_DEFS[idx].name);
+          });
+        });
+      });
+    }
+    if (document.querySelectorAll) {
+      document.querySelectorAll("[data-gen]").forEach((el) => {
+        el.addEventListener("click", () => {
+          const gi = Number(el.getAttribute("data-gen"));
+          const idx = LEVEL_DEFS.length + gi;
+          enterWithMode(() => {
+            startLevel(idx);
+            toast(GEN_LEVELS[gi].name + " · " + GEN_LEVELS[gi].hint);
+          });
+        });
+      });
+    }
+    updateModeButtons();
+    document.getElementById("btn-segments").addEventListener("click", showSegments);
+    document.getElementById("btn-seg-back").addEventListener("click", () => UI.show("s-boot"));
+    document.getElementById("btn-cam").addEventListener("click", () => beginCamera());
+    document.getElementById("btn-demo").addEventListener("click", () => beginDemo());
+    document.getElementById("btn-retry").addEventListener("click", () => beginCamera(pendingStart));
+    document.getElementById("btn-demo2").addEventListener("click", () => beginDemo(pendingStart));
+    document.getElementById("btn-resume").addEventListener("click", togglePause);
+    document.getElementById("btn-restart").addEventListener("click", () => {
+      UI.hideAll();
+      startLevel(Game.levelIndex);
+    });
+    document.getElementById("btn-quit").addEventListener("click", () => {
+      Game.state = "boot";
+      Game.level = null;
+      UI.show("s-boot");
+    });
+    document.getElementById("btn-next").addEventListener("click", () => {
+      if (Game.state !== "result") return;
+      UI.hideAll();
+      nextLevelOrSegment();
+    });
+    document.getElementById("btn-again").addEventListener("click", () => {
+      UI.hideAll();
+      if (Game.isSegment) startSegment(Game.segmentIndex || 0);
+      else startLevel(Game.levelIndex);
+    });
+    document.getElementById("btn-title").addEventListener("click", () => {
+      Game.state = "boot";
+      Game.level = null;
+      if (Game.isSegment) showSegments();
+      else UI.show("s-boot");
+    });
+
+    // 鼠标（演示模式）
+    canvas.addEventListener("mousemove", (e) => {
+      const p = toLogical(e.clientX, e.clientY);
+      Game.input.mouse.x = clamp(p.x, 0, VIEW_W);
+      Game.input.mouse.y = clamp(p.y, 0, VIEW_H);
+    });
+    canvas.addEventListener("mousedown", (e) => {
+      Sfx.ensure();
+      if (Game.mode !== "demo") return;
+      e.preventDefault();
+    });
+    canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+    // 键盘
+    window.addEventListener("keyup", (e) => {
+      const k = e.key.toLowerCase();
+      if (Game.demo && Game.demo.keys[k]) Game.demo.keys[k] = false;
+    });
+    window.addEventListener("keydown", (e) => {
+      Sfx.ensure();
+      const k = e.key.toLowerCase();
+      if (Game.demo) {
+        if (["w", "a", "s", "d", "i", "j", "k", "l"].includes(k)) {
+          Game.demo.keys[k] = true;
+          e.preventDefault();
+        }
+        if (k === "x") {
+          Game.demo.c1 = !Game.demo.c1;
+          toast(Game.demo.c1 ? "左手：抓紧" : "左手：张开");
+          return;
+        }
+        if (k === "m") {
+          Game.demo.c2 = !Game.demo.c2;
+          toast(Game.demo.c2 ? "右手：抓紧" : "右手：张开");
+          return;
+        }
+      }
+      if (k === " " || e.code === "Space") {
+        e.preventDefault();
+        if (Game.state === "boot") beginDemo();
+        else if (Game.state === "result") {
+          UI.hideAll();
+          nextLevelOrSegment();
+        }
+        return;
+      }
+      if (k === "escape" || k === "p") {
+        if (Game.state === "play" || Game.state === "paused") togglePause();
+        return;
+      }
+      if (k === "r" && Game.state === "play") { respawn(); return; }
+      if (k === "c") {
+        toast("黄色圆点就是身体：把手相对它的位置摆好即可");
+        return;
+      }
+      if (k === "f") {
+        const camEl = document.getElementById("cam");
+        if (camEl) camEl.classList.toggle("hidden");
+        return;
+      }
+      if (k === "0") {
+        Sfx.muted = !Sfx.muted;
+        toast(Sfx.muted ? "已静音" : "已开启声音");
+        return;
+      }
+      if (/^[1-5]$/.test(k)) {
+        const idx = Number(k) - 1;
+        enterWithMode(() => {
+          startLevel(idx);
+          toast("第 " + k + " 关 · " + LEVEL_DEFS[idx].name);
+        });
+        return;
+      }
+      if (k === "n" && Game.state === "result") {
+        UI.hideAll();
+        nextLevelOrSegment();
+        return;
+      }
+    });
+
+    requestAnimationFrame(frame);
+    UI.show("s-boot");
+  }
+
+  function togglePause() {
+    if (Game.state === "play") {
+      Game.state = "paused";
+      UI.show("s-pause");
+    } else if (Game.state === "paused") {
+      Game.state = "play";
+      UI.hideAll();
+    }
+  }
+
+  function toLogical(clientX, clientY) {
+    return {
+      x: (clientX - view.ox) / view.scale,
+      y: (clientY - view.oy) / view.scale
+    };
+  }
+
+  /* ============================================================
+   * 12. 对外接口（测试用）
+   * ============================================================ */
+  Game.startLevel = startLevel;
+  Game.startSegment = startSegment;
+  Game.step = stepPhysics;
+  Game.respawn = respawn;
+  Game.completeLevel = completeLevel;
+  Game.Input = Input;
+  Game.Cam = Cam;
+  Game.UI = UI;
+  Game.beginDemo = beginDemo;
+  Game.beginCamera = beginCamera;
+  Game.togglePause = togglePause;
+
+  if (typeof window !== "undefined") {
+    window.Game = Game;
+    window.__WHATSUP__ = { VERSION, VIEW_W, VIEW_H, WORLD_W, WORLD_H, REACH, GRAB };
+  }
+  if (typeof document !== "undefined" && document.getElementById) {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", boot);
+    } else {
+      boot();
+    }
+  }
+})();
