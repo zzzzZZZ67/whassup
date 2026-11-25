@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>What's Up? · v0.5.2</title>
+<title>What's Up? · v0.5.3</title>
 <style>
   :root{
     --gold:#e9b96e;
@@ -139,6 +139,17 @@
     background:linear-gradient(180deg,#f2c780,#d19a45);
     box-shadow:0 0 16px rgba(242,199,128,.65);
   }
+  #mobile-pads .grip-btn{
+    position:absolute;top:-10px;right:-10px;width:56px;height:56px;border-radius:50%;
+    padding:0;font:inherit;font-size:14px;font-weight:700;line-height:1;
+    background:rgba(10,9,7,.72);color:var(--muted);
+    border:1px solid rgba(233,185,110,.4);pointer-events:auto;cursor:pointer;
+    touch-action:none;z-index:2;
+  }
+  #mobile-pads .grip-btn.on{
+    background:linear-gradient(180deg,#f2c780,#d19a45);color:#2a1a08;
+    border-color:#f2c780;box-shadow:0 0 16px rgba(242,199,128,.7);
+  }
   #mobile-pads .pad-tag{
     position:absolute;left:-10px;right:-10px;bottom:-22px;text-align:center;
     font-size:11px;color:var(--muted);white-space:nowrap;
@@ -160,8 +171,8 @@
   <canvas id="game"></canvas>
   <canvas id="cam" class="hidden" width="260" height="195"></canvas>
   <div id="mobile-pads">
-    <div class="pad" id="pad-1"><div class="knob"></div><div class="pad-tag">手 1 · 双击抓/放</div></div>
-    <div class="pad" id="pad-2"><div class="knob"></div><div class="pad-tag">手 2 · 双击抓/放</div></div>
+    <div class="pad" id="pad-1"><div class="knob"></div><button class="grip-btn" id="grip-1">抓</button><div class="pad-tag">手 1</div></div>
+    <div class="pad" id="pad-2"><div class="knob"></div><button class="grip-btn" id="grip-2">抓</button><div class="pad-tag">手 2</div></div>
   </div>
   <div id="toast"></div>
   <div id="ui">
@@ -271,7 +282,7 @@
   /* ============================================================
    * 0. 元信息与常量
    * ============================================================ */
-  const VERSION = "v0.5.2";
+  const VERSION = "v0.5.3";
   const VIEW_W = 1600, VIEW_H = 900;
   const WORLD_W = 3200, WORLD_H = 4400;
   function worldH() { return Game.worldH || WORLD_H; }
@@ -880,21 +891,24 @@
           if (!dragging) return;
           dragging = false;
           // 松手后保留当前角度与臂长（手不回缩），摇杆停在原位
-          if (moved < 18) {
-            const now = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
-            if (now - pad.lastTap < 350) {
-              pad.grip = !pad.grip;
-              if (el.classList) el.classList.toggle("grip", pad.grip);
-              pad.lastTap = 0;
-              Sfx.ensure();
-            } else {
-              pad.lastTap = now;
-            }
-          }
         };
         el.addEventListener("pointerup", finish);
         el.addEventListener("pointercancel", finish);
         el.addEventListener("pointerleave", finish);
+
+        // 轮盘上的抓/放按钮：点一下切换，抓住时按钮亮起
+        const btn = document.getElementById("grip-" + (i + 1));
+        if (btn && btn.addEventListener) {
+          const toggleGrip = (ev) => {
+            if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+            pad.grip = !pad.grip;
+            if (btn.classList) btn.classList.toggle("on", pad.grip);
+            if (el.classList) el.classList.toggle("grip", pad.grip);
+            Sfx.ensure();
+          };
+          btn.addEventListener("pointerdown", toggleGrip);
+          btn.addEventListener("click", (ev) => ev.preventDefault());
+        }
       }
     }
   };
@@ -2384,7 +2398,7 @@
       if (camEl) camEl.classList.add("hidden");
     }
     updateMobilePads();
-    toast("移动端模式 · 左右轮盘拖动控制手 · 双击轮盘切换抓握");
+    toast("移动端模式 · 拖动轮盘控制手 · 点轮盘上的「抓」按钮切换抓握");
   }
 
   function switchMode(mode) {
@@ -2494,7 +2508,7 @@
     }
     updateModeButtons();
     const verEl = document.getElementById("boot-ver");
-    if (verEl) verEl.textContent = VERSION + " · 触屏松手不回缩";
+    if (verEl) verEl.textContent = VERSION + " · 触屏抓/放按钮";
     Mobile.bind();
     document.getElementById("btn-mobile").addEventListener("click", () => beginMobile());
     document.getElementById("btn-segments").addEventListener("click", showSegments);

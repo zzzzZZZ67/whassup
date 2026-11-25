@@ -167,6 +167,16 @@ if (pd && pu) {
   const vlen = Math.hypot(G.Mobile.pads[0].vec.x, G.Mobile.pads[0].vec.y);
   if (!(vlen > 0.2)) { console.log("松手后手部回缩了"); process.exit(1); }
   console.log("轮盘松手后手部不回缩");
+
+// 轮盘上的抓/放按钮：点一下切换抓握状态
+const gripBtn = handlers["grip-1:pointerdown"];
+if (!gripBtn) { console.log("找不到抓/放按钮"); process.exit(1); }
+const g0 = G.Mobile.pads[0].grip;
+gripBtn({ preventDefault() {}, stopPropagation() {} });
+if (G.Mobile.pads[0].grip === g0) { console.log("抓/放按钮没有切换状态"); process.exit(1); }
+gripBtn({ preventDefault() {}, stopPropagation() {} });
+if (G.Mobile.pads[0].grip !== g0) { console.log("抓/放按钮不能切回"); process.exit(1); }
+console.log("抓/放按钮切换正常");
 }
 
 console.log("DOM 冒烟测试通过");
