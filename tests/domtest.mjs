@@ -158,4 +158,15 @@ if (mobBtn) {
   console.log("移动端模式正常（摇杆输入 + 抓握）");
 }
 
+// 移动端：松手后手不回缩（摇杆停在原位）
+const pd = handlers["pad-1:pointerdown"];
+const pu = handlers["pad-1:pointerup"];
+if (pd && pu) {
+  pd({ clientX: 125, clientY: 75, pointerId: 1, preventDefault() {} });
+  pu({ clientX: 125, clientY: 75, pointerId: 1, preventDefault() {} });
+  const vlen = Math.hypot(G.Mobile.pads[0].vec.x, G.Mobile.pads[0].vec.y);
+  if (!(vlen > 0.2)) { console.log("松手后手部回缩了"); process.exit(1); }
+  console.log("轮盘松手后手部不回缩");
+}
+
 console.log("DOM 冒烟测试通过");

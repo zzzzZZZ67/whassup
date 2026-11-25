@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>What's Up? · v0.5.0</title>
+<title>What's Up? · v0.5.1</title>
 <style>
   :root{
     --gold:#e9b96e;
@@ -269,7 +269,7 @@
   /* ============================================================
    * 0. 元信息与常量
    * ============================================================ */
-  const VERSION = "v0.5.0";
+  const VERSION = "v0.5.1";
   const VIEW_W = 1600, VIEW_H = 900;
   const WORLD_W = 3200, WORLD_H = 4400;
   function worldH() { return Game.worldH || WORLD_H; }
@@ -877,8 +877,7 @@
         const finish = () => {
           if (!dragging) return;
           dragging = false;
-          pad.vec = { x: 0, y: 0 };
-          if (pad.knob && pad.knob.style) pad.knob.style.transform = "";
+          // 松手后保留当前角度与臂长（手不回缩），摇杆停在原位
           if (moved < 18) {
             const now = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
             if (now - pad.lastTap < 350) {
