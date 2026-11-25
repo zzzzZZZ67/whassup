@@ -177,6 +177,19 @@ if (G.Mobile.pads[0].grip === g0) { console.log("抓/放按钮没有切换状态
 gripBtn({ preventDefault() {}, stopPropagation() {} });
 if (G.Mobile.pads[0].grip !== g0) { console.log("抓/放按钮不能切回"); process.exit(1); }
 console.log("抓/放按钮切换正常");
+
+// 移动端复位按钮：回到最后解锁的存档点
+const respBtn = handlers["btn-respawn:click"];
+if (!respBtn) { console.log("找不到复位按钮"); process.exit(1); }
+if (G.state !== "play") G.startLevel(0);
+G.core.x = 700; G.core.y = 3000; G.core.vx = 0; G.core.vy = 0;
+respBtn({ preventDefault() {} });
+const cp = G.level.checkpoints[G.cpIndex];
+if (Math.abs(G.core.x - cp.spawn.x) > 1 || Math.abs(G.core.y - cp.spawn.y) > 1) {
+  console.log("复位没有回到存档点: " + G.core.x.toFixed(0) + "," + G.core.y.toFixed(0));
+  process.exit(1);
+}
+console.log("复位按钮回到存档点");
 }
 
 console.log("DOM 冒烟测试通过");

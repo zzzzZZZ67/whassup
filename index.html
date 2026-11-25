@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>What's Up? · v0.5.3</title>
+<title>What's Up? · v0.5.4</title>
 <style>
   :root{
     --gold:#e9b96e;
@@ -139,6 +139,15 @@
     background:linear-gradient(180deg,#f2c780,#d19a45);
     box-shadow:0 0 16px rgba(242,199,128,.65);
   }
+  #btn-respawn{
+    position:absolute;top:14px;right:16px;width:74px;height:46px;border-radius:12px;
+    padding:0;font:inherit;font-size:15px;font-weight:600;
+    background:rgba(10,9,7,.68);color:var(--ink);
+    border:1px solid rgba(233,185,110,.42);pointer-events:auto;
+    touch-action:none;cursor:pointer;z-index:3;
+  }
+  #btn-respawn:active{background:rgba(233,185,110,.28)}
+
   #mobile-pads .grip-btn{
     position:absolute;top:-10px;right:-10px;width:56px;height:56px;border-radius:50%;
     padding:0;font:inherit;font-size:14px;font-weight:700;line-height:1;
@@ -171,6 +180,7 @@
   <canvas id="game"></canvas>
   <canvas id="cam" class="hidden" width="260" height="195"></canvas>
   <div id="mobile-pads">
+    <button id="btn-respawn">复位</button>
     <div class="pad" id="pad-1"><div class="knob"></div><button class="grip-btn" id="grip-1">抓</button><div class="pad-tag">手 1</div></div>
     <div class="pad" id="pad-2"><div class="knob"></div><button class="grip-btn" id="grip-2">抓</button><div class="pad-tag">手 2</div></div>
   </div>
@@ -282,7 +292,7 @@
   /* ============================================================
    * 0. 元信息与常量
    * ============================================================ */
-  const VERSION = "v0.5.3";
+  const VERSION = "v0.5.4";
   const VIEW_W = 1600, VIEW_H = 900;
   const WORLD_W = 3200, WORLD_H = 4400;
   function worldH() { return Game.worldH || WORLD_H; }
@@ -2508,8 +2518,16 @@
     }
     updateModeButtons();
     const verEl = document.getElementById("boot-ver");
-    if (verEl) verEl.textContent = VERSION + " · 触屏抓/放按钮";
+    if (verEl) verEl.textContent = VERSION + " · 触屏抓/放 + 复位";
     Mobile.bind();
+    const respBtn = document.getElementById("btn-respawn");
+    if (respBtn && respBtn.addEventListener) {
+      respBtn.addEventListener("pointerdown", (ev) => { ev.preventDefault(); ev.stopPropagation(); });
+      respBtn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        if (Game.state === "play" || Game.state === "paused") respawn();
+      });
+    }
     document.getElementById("btn-mobile").addEventListener("click", () => beginMobile());
     document.getElementById("btn-segments").addEventListener("click", showSegments);
     document.getElementById("btn-seg-back").addEventListener("click", () => UI.show("s-boot"));
