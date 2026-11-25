@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>What's Up? · v0.4.3</title>
+<title>What's Up? · v0.4.4</title>
 <style>
   :root{
     --gold:#e9b96e;
@@ -225,7 +225,7 @@
   /* ============================================================
    * 0. 元信息与常量
    * ============================================================ */
-  const VERSION = "v0.4.3";
+  const VERSION = "v0.4.4";
   const VIEW_W = 1600, VIEW_H = 900;
   const WORLD_W = 3200, WORLD_H = 4400;
   function worldH() { return Game.worldH || WORLD_H; }
@@ -817,31 +817,32 @@
 
       // 演示模式：WASD 移动手1，IJKL 移动手2，X/M 切换左右手抓握
       const d = g.demo;
-      const sp = 460;                       // 手移动速度（px/s）
       const kk = d.keys;
-      const ax = (kk.d ? 1 : 0) - (kk.a ? 1 : 0);
-      const ay = (kk.s ? 1 : 0) - (kk.w ? 1 : 0);
-      const bx = (kk.l ? 1 : 0) - (kk.j ? 1 : 0);
-      const by = (kk.k ? 1 : 0) - (kk.i ? 1 : 0);
-      d.h1.x += ax * sp * dt;
-      d.h1.y += ay * sp * dt;
-      d.h2.x += bx * sp * dt;
-      d.h2.y += by * sp * dt;
-      // 关键：把手的偏移本身也夹在 [MIN_REACH, REACH] 内，
-      // 否则按键会一直累加、超过臂展后被截断，反方向要"倒车"很久才能动
-      const norm = (o) => {
-        const raw = Math.hypot(o.x, o.y);
-        if (raw < 1) {
-          o.x = 0;
-          o.y = -MIN_REACH;
-          return { dx: 0, dy: -MIN_REACH, len: MIN_REACH };
-        }
-        const len = clamp(raw, MIN_REACH, REACH);
-        o.x = o.x / raw * len;
-        o.y = o.y / raw * len;
-        return { dx: o.x, dy: o.y, len };
+      // 手 1：A/D 转动手臂，W/S 伸长/缩短
+      // 手 2：J/L 转动，I/K 伸长/缩短
+      const rot1 = (kk.d ? 1 : 0) - (kk.a ? 1 : 0);
+      const ext1 = (kk.w ? 1 : 0) - (kk.s ? 1 : 0);
+      const rot2 = (kk.l ? 1 : 0) - (kk.j ? 1 : 0);
+      const ext2 = (kk.i ? 1 : 0) - (kk.k ? 1 : 0);
+      const ROT_SPEED = 3.0;                // rad/s ≈ 172°/s
+      const LEN_SPEED = 520;                // px/s
+      const moveHand = (h, rot, ext) => {
+        let l = Math.hypot(h.x, h.y);
+        if (l < 1) { h.x = 0; h.y = -MIN_REACH; l = MIN_REACH; }
+        let a = Math.atan2(h.y, h.x) + rot * ROT_SPEED * dt;
+        l = clamp(l + ext * LEN_SPEED * dt, MIN_REACH, REACH);
+        h.x = Math.cos(a) * l;
+        h.y = Math.sin(a) * l;
       };
-      const a1 = norm(d.h1), a2 = norm(d.h2);
+      moveHand(d.h1, rot1, ext1);
+      moveHand(d.h2, rot2, ext2);
+      const rawOf = (o) => {
+        const raw = Math.hypot(o.x, o.y);
+        if (raw < 1) return { dx: 0, dy: -MIN_REACH, len: MIN_REACH };
+        const len = clamp(raw, MIN_REACH, REACH);
+        return { dx: o.x / raw * len, dy: o.y / raw * len, len };
+      };
+      const a1 = rawOf(d.h1), a2 = rawOf(d.h2);
       return {
         hands: [
           { dx: a1.dx, dy: a1.dy, len: a1.len, closed: !!d.c1 },
@@ -2233,6 +2234,16 @@
 
   function beginDemo(startFn) {
     switchMode("demo");
+    if (!startFn) {
+      // 只切换模式，不直接开局：保留标题页的选关/选路段
+      UI.show("s-boot");
+      if (typeof document !== "undefined") {
+        const camEl = document.getElementById("cam");
+        if (camEl) camEl.classList.add("hidden");
+      }
+      toast("演示模式已启用 · 请选择教学关 / 路段 / 正式关卡");
+      return;
+    }
     if (Game.demo) {
       Game.demo.h1 = { x: -140, y: -70 };
       Game.demo.h2 = { x: 140, y: -70 };
@@ -2246,7 +2257,7 @@
       if (camEl) camEl.classList.add("hidden");
     }
     (startFn || (() => startLevel(0)))();
-    toast("演示模式：WASD 手1 · IJKL 手2 · X/M 切换抓握");
+    toast("演示模式：A/D 转动手1 · W/S 伸缩 · J/L 转动手2 · I/K 伸缩 · X/M 抓握");
   }
 
   // 进入教学关 / 路段：默认走摄像头；用户明确选过演示模式才用演示

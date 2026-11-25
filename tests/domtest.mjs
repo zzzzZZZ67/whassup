@@ -81,6 +81,7 @@ console.log("boot ok, version", G.version, "state", G.state);
 const demoBtn = handlers["btn-demo:click"];
 if (!demoBtn) { console.log("找不到演示按钮"); process.exit(1); }
 demoBtn();
+G.startLevel(0);          // 演示模式现在保留选关，测试里手动开始第 1 关
 console.log("开始演示后 state", G.state, "level", G.level && G.level.name);
 
 // 跑 300 帧（每帧 16.7ms）
@@ -119,18 +120,25 @@ kd({ key: "i", code: "", preventDefault() {} });
 G.step(1 / 120);
 ku({ key: "i", code: "" });
 if (!(G.demo.h2.y < h2y)) { console.log("I 没有让手 2 上移"); process.exit(1); }
-// 长按方向键：手偏移不应无限累加（松手后要能立刻反向）
+// 新控制：A/D 转动手臂，W/S 伸缩，转角度不应卡住
+const angOf = () => Math.atan2(G.demo.h1.y, G.demo.h1.x);
+const lenOf = () => Math.hypot(G.demo.h1.x, G.demo.h1.y);
 kd({ key: "d", code: "", preventDefault() {} });
-for (let i = 0; i < 480; i++) G.step(1 / 120);
-ku({ key: "d", code: "" });
-const h1len = Math.hypot(G.demo.h1.x, G.demo.h1.y);
-if (h1len > 305) { console.log("手偏移没有夹住: " + h1len.toFixed(0)); process.exit(1); }
-const hx0 = G.demo.h1.x;
-kd({ key: "a", code: "", preventDefault() {} });
 for (let i = 0; i < 60; i++) G.step(1 / 120);
-ku({ key: "a", code: "" });
-if (!(G.demo.h1.x < hx0 - 150)) { console.log("松手后反向按 A 没有立刻移动"); process.exit(1); }
-console.log("长按后反向移动正常（手偏移夹在 300 内）");
+ku({ key: "d", code: "" });
+const a1 = angOf();
+kd({ key: "d", code: "", preventDefault() {} });
+for (let i = 0; i < 60; i++) G.step(1 / 120);
+ku({ key: "d", code: "" });
+const a2 = angOf();
+if (Math.abs(a2 - a1) < 0.5) { console.log("按住 D 转不动: " + (a2 - a1).toFixed(2)); process.exit(1); }
+if (lenOf() > 305) { console.log("手长度超出臂展"); process.exit(1); }
+const l0 = lenOf();
+kd({ key: "s", code: "", preventDefault() {} });
+for (let i = 0; i < 40; i++) G.step(1 / 120);
+ku({ key: "s", code: "" });
+if (!(lenOf() < l0 - 40)) { console.log("按住 S 没有缩短手臂"); process.exit(1); }
+console.log("转动与伸缩正常（角度连续变化，长度不超臂展）");
 
 console.log("演示键位 X/M/IJKL 正常");
 
